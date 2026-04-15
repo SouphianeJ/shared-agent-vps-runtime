@@ -25,7 +25,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 ## Structure runtime sur le VPS
 
 ```text
-/srv/shared-agent-vps-runtime
+~/shared-agent-vps-runtime
   docker-compose.yml
   .env
   config/apps.json
@@ -56,7 +56,7 @@ Secrets attendus dans le repo GitHub:
 
 ## Bootstrap initial
 
-1. Cloner le repo sur le VPS dans `/srv/shared-agent-vps-runtime`.
+1. Cloner le repo sur le VPS dans `~/shared-agent-vps-runtime`.
 2. Copier `.env.example` vers `.env` et renseigner les secrets.
 3. Lancer `bash scripts/bootstrap-vps.sh`.
 4. Verifier `curl` signe sur `/codex/health`.

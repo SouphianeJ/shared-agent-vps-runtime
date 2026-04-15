@@ -26,10 +26,10 @@ jobs:
           rsync -az --delete \
             --exclude '.git/' \
             --exclude '.env' \
-            ./ "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_SSH_HOST }}:/srv/shared-agent-vps-runtime/"
+            ./ "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_SSH_HOST }}:~/shared-agent-vps-runtime/"
 
       - name: Deploy runtime
         shell: bash
         run: |
           ssh "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_SSH_HOST }}" \
-            'cd /srv/shared-agent-vps-runtime && bash scripts/bootstrap-vps.sh'
+            'cd ~/shared-agent-vps-runtime && bash scripts/bootstrap-vps.sh'
