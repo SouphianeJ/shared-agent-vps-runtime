@@ -177,6 +177,7 @@ async function loadAppRegistry() {
           id: appId,
           displayName: String(app.displayName ?? appId),
           copilotMcpEnvPrefix: String(app.copilotMcpEnvPrefix ?? "").trim(),
+          appHome: buildRuntimePath(String(app.paths?.appHome ?? "")),
           codexHome: buildRuntimePath(String(app.paths?.codexHome ?? "")),
           copilotHome: buildRuntimePath(String(app.paths?.copilotHome ?? "")),
           workspaceRoot: buildRuntimePath(String(app.paths?.workspaceRoot ?? "")),
@@ -262,6 +263,7 @@ function buildWorkspacePath(appConfig, chatId) {
 }
 
 async function ensureAppPaths(appConfig, workspacePath) {
+  await mkdir(appConfig.appHome, { recursive: true });
   await mkdir(appConfig.codexHome, { recursive: true });
   await mkdir(appConfig.copilotHome, { recursive: true });
   await mkdir(appConfig.workspaceRoot, { recursive: true });
@@ -320,7 +322,7 @@ async function ensureCopilotWorkspaceSettings(appConfig, workspacePath, reasonin
 function spawnAgent(payload, appConfig, workspacePath) {
   const runtimeEnv = {
     ...process.env,
-    HOME: appConfig.copilotHome,
+    HOME: appConfig.appHome,
     CODEX_HOME: appConfig.codexHome,
     COPILOT_HOME: appConfig.copilotHome,
   };

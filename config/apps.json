@@ -6,6 +6,7 @@
       "slug": "vps-personal-codex",
       "copilotMcpEnvPrefix": "VPS_PERSONAL_CODEX",
       "paths": {
+        "appHome": "apps/vps-personal-codex",
         "codexHome": "apps/vps-personal-codex/codex-home",
         "copilotHome": "apps/vps-personal-codex/copilot-home",
         "workspaceRoot": "apps/vps-personal-codex/workspaces/chats"
@@ -17,6 +18,7 @@
       "slug": "weekly-ideator-control-plane",
       "copilotMcpEnvPrefix": "WEEKLY_IDEATOR",
       "paths": {
+        "appHome": "apps/weekly-ideator-control-plane",
         "codexHome": "apps/weekly-ideator-control-plane/codex-home",
         "copilotHome": "apps/weekly-ideator-control-plane/copilot-home",
         "workspaceRoot": "apps/weekly-ideator-control-plane/workspaces/chats"
