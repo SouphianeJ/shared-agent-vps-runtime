@@ -11,6 +11,8 @@ for app in vps-personal-codex weekly-ideator-control-plane; do
     "$ROOT_DIR/runtime/apps/$app/codex-home" \
     "$ROOT_DIR/runtime/apps/$app/copilot-home" \
     "$ROOT_DIR/runtime/apps/$app/workspaces/chats"
+  ln -sfn "$ROOT_DIR/runtime/apps/$app/codex-home" "$ROOT_DIR/runtime/apps/$app/.codex"
+  ln -sfn "$ROOT_DIR/runtime/apps/$app/copilot-home" "$ROOT_DIR/runtime/apps/$app/.copilot"
 done
 
 docker compose --env-file "$ROOT_DIR/.env" -f "$ROOT_DIR/docker-compose.yml" up -d --build
