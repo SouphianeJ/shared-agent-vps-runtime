@@ -91,13 +91,18 @@ const server = createServer(async (request, response) => {
     });
 
     const child = spawnAgent(payload, appConfig, workspacePath);
+    let stderrBuffer = "";
+    let sawStdout = false;
 
     child.stdout.on("data", (chunk) => {
+      sawStdout = true;
       response.write(chunk);
     });
 
     child.stderr.on("data", (chunk) => {
-      console.error(chunk.toString());
+      const message = chunk.toString();
+      stderrBuffer += message;
+      console.error(message);
     });
 
     child.on("error", (error) => {
@@ -108,7 +113,25 @@ const server = createServer(async (request, response) => {
       response.end(error.message);
     });
 
-    child.on("close", () => {
+    child.on("close", (code) => {
+      const errorMessage = stderrBuffer.trim();
+
+      if (code && !response.writableEnded) {
+        response.write(
+          `${JSON.stringify({
+            type: "error",
+            message: errorMessage || `Agent process exited with status ${code}.`,
+          })}\n`,
+        );
+      } else if (!sawStdout && errorMessage && !response.writableEnded) {
+        response.write(
+          `${JSON.stringify({
+            type: "error",
+            message: errorMessage,
+          })}\n`,
+        );
+      }
+
       response.end();
     });
 
