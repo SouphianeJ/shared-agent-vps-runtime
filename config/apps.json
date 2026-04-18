@@ -23,6 +23,18 @@
         "copilotHome": "apps/weekly-ideator-control-plane/copilot-home",
         "workspaceRoot": "apps/weekly-ideator-control-plane/workspaces/chats"
       }
+    },
+    {
+      "id": "moodle-actions",
+      "displayName": "Moodle Actions",
+      "slug": "moodle-actions",
+      "copilotMcpEnvPrefix": "MOODLE_ACTIONS",
+      "paths": {
+        "appHome": "apps/moodle-actions",
+        "codexHome": "apps/moodle-actions/codex-home",
+        "copilotHome": "apps/moodle-actions/copilot-home",
+        "workspaceRoot": "apps/moodle-actions/workspaces/chats"
+      }
     }
   ]
 }

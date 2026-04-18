@@ -1,4 +1,4 @@
-AGENT_RUNTIME_APP_ID=vps-personal-codex
+AGENT_RUNTIME_APP_ID=moodle-actions
 CODEX_BRIDGE_URL=https://141.94.95.125
 PROXY_KEY_ID_ACTIVE=codex-v1
 PROXY_SIGNING_KEY_ACTIVE=
@@ -8,7 +8,7 @@ CODEX_VPS_COMPOSE_DIR=~/shared-agent-vps-runtime
 CODEX_VPS_COMPOSE_FILE=docker-compose.yml
 CODEX_VPS_COMPOSE_ENV_FILE=.env
 CODEX_VPS_CONTAINER_NAME=shared-agent-runtime-shell
-CODEX_VPS_WORKSPACE_ROOT=/runtime/apps/vps-personal-codex/workspaces/chats
+CODEX_VPS_WORKSPACE_ROOT=/runtime/apps/moodle-actions/workspaces/chats
 CODEX_MODEL=
 CODEX_ALLOW_DANGEROUS=true
 

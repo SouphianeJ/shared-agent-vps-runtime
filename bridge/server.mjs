@@ -279,10 +279,20 @@ function buildCopilotMcpPayload(appConfig) {
     MCPcompetencies: "https://mcp-personal-competencies-client-pr.vercel.app/mcp",
     Moodle: "https://mcp-moodle-client-proxy.vercel.app/mcp",
   };
+  const enabledServersRaw = process.env[`${prefix}_COPILOT_ENABLED_SERVERS`]?.trim() ?? "";
+  const enabledServers = enabledServersRaw
+    ? new Set(
+        enabledServersRaw
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
+      )
+    : null;
+  const selectedEntries = Object.entries(defaults).filter(([name]) => !enabledServers || enabledServers.has(name));
 
   return {
     mcpServers: Object.fromEntries(
-      Object.entries(defaults).map(([name, fallback]) => {
+      selectedEntries.map(([name, fallback]) => {
         const envName =
           name === "GithubPerso"
             ? `${prefix}_COPILOT_MCP_GITHUB_URL`

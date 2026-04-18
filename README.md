@@ -21,6 +21,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 
 - `vps-personal-codex`
 - `weekly-ideator-control-plane`
+- `moodle-actions`
 
 ## Structure runtime sur le VPS
 
@@ -34,6 +35,10 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
       codex-home/
       copilot-home/
       workspaces/
+    moodle-actions/
+      codex-home/
+      copilot-home/
+      workspaces/
     weekly-ideator-control-plane/
       codex-home/
       copilot-home/
@@ -43,6 +48,9 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 ## Variables d'environnement
 
 Voir [.env.example](./.env.example).
+
+Pour `moodle-actions`, utiliser l'app id `moodle-actions` et, si besoin, surcharger les URLs MCP Copilot avec le prefix `MOODLE_ACTIONS_`.
+Pour limiter le nombre de tools exposes a Copilot, utiliser `MOODLE_ACTIONS_COPILOT_ENABLED_SERVERS=Moodle`.
 
 ## Deploiement
 
