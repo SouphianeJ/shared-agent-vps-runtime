@@ -52,6 +52,37 @@ Voir [.env.example](./.env.example).
 Pour `moodle-actions`, utiliser l'app id `moodle-actions` et, si besoin, surcharger les URLs MCP Copilot avec le prefix `MOODLE_ACTIONS_`.
 Pour limiter le nombre de tools exposes a Copilot, utiliser `MOODLE_ACTIONS_COPILOT_ENABLED_SERVERS=Moodle`.
 
+## Auth Codex via R2
+
+Le runtime partage peut restaurer et republier `auth.json` pour chaque app directement depuis R2, sans dependre du control-plane `weekly-ideator-control-plane`.
+
+Variables requises dans `.env`:
+
+- `R2_BUCKET`
+- `R2_ENDPOINT`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+
+Configuration optionnelle:
+
+- `R2_CODEX_AUTH_PREFIX`
+  - prefix par defaut pour les objets, par exemple `codex-auth`
+- `<APP_PREFIX>_CODEX_AUTH_OBJECT_KEY`
+  - surcharge explicite par app, par exemple `VPS_PERSONAL_CODEX_CODEX_AUTH_OBJECT_KEY`
+
+Convention par defaut:
+
+- `codex-auth/vps-personal-codex/auth.json`
+- `codex-auth/weekly-ideator-control-plane/auth.json`
+- `codex-auth/moodle-actions/auth.json`
+
+Scripts:
+
+- `bash scripts/restore-auth-from-r2.sh <app_id>`
+- `bash scripts/upload-auth-to-r2.sh <app_id>`
+
+Le bootstrap appelle automatiquement le restore R2 pour chaque app declaree dans `config/apps.json` lorsque la configuration R2 est presente.
+
 ## Deploiement
 
 Le workflow GitHub Actions `deploy-runtime.yml` pousse la branche `main` sur le VPS cible et relance `docker compose up -d --build`.
