@@ -13,6 +13,16 @@ auth_r2_load_env() {
     . "$root_dir/.env"
     set +a
   fi
+  if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+    export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+  fi
+  if [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+    export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+  fi
+  if [ -n "${R2_ENDPOINT:-}" ] && [ -z "${AWS_DEFAULT_REGION:-}" ]; then
+    export AWS_DEFAULT_REGION="auto"
+  fi
+  export AWS_EC2_METADATA_DISABLED="true"
 }
 
 auth_r2_require_app() {
