@@ -78,10 +78,10 @@ const server = createServer(async (request, response) => {
     const appConfig = await resolveAppConfig(payload.appId);
     const workspacePath = buildWorkspacePath(appConfig, payload.chatId);
 
-    await ensureAppPaths(appConfig, workspacePath);
+    await ensureAppPaths(appConfig, workspacePath, payload.enabledMcpServers);
 
     if (payload.engine === "copilot") {
-      await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort);
+      await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, payload.enabledMcpServers);
     }
 
     response.writeHead(200, {
@@ -241,6 +241,9 @@ function parsePayload(rawBody) {
       : null;
   const allowBypassSandbox =
     typeof payload.allowBypassSandbox === "boolean" ? payload.allowBypassSandbox : allowDangerousDefault;
+  const enabledMcpServers = Array.isArray(payload.enabledMcpServers)
+    ? payload.enabledMcpServers.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : null;
 
   if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
     throw new Error("Invalid app id.");
@@ -263,6 +266,7 @@ function parsePayload(rawBody) {
     model,
     reasoningEffort,
     allowBypassSandbox,
+    enabledMcpServers,
   };
 }
 
@@ -270,19 +274,19 @@ function buildWorkspacePath(appConfig, chatId) {
   return `${appConfig.workspaceRoot.replace(/\/+$/, "")}/${chatId}`;
 }
 
-async function ensureAppPaths(appConfig, workspacePath) {
+async function ensureAppPaths(appConfig, workspacePath, payloadEnabledServers = null) {
   await mkdir(appConfig.appHome, { recursive: true });
   await mkdir(appConfig.codexHome, { recursive: true });
   await mkdir(appConfig.copilotHome, { recursive: true });
   await mkdir(appConfig.workspaceRoot, { recursive: true });
   await mkdir(workspacePath, { recursive: true });
-  await ensureCodexHomeConfig(appConfig);
+  await ensureCodexHomeConfig(appConfig, payloadEnabledServers);
 }
 
-function getSelectedMcpServerEntries(appConfig) {
+function getSelectedMcpServerEntries(appConfig, payloadEnabledServers = null) {
   const prefix = appConfig.copilotMcpEnvPrefix;
   const enabledServersRaw = process.env[`${prefix}_COPILOT_ENABLED_SERVERS`]?.trim() ?? "";
-  const enabledServers = enabledServersRaw
+  const envEnabledServers = enabledServersRaw
     ? new Set(
         enabledServersRaw
           .split(",")
@@ -290,6 +294,10 @@ function getSelectedMcpServerEntries(appConfig) {
           .filter(Boolean),
       )
     : null;
+  const requestEnabledServers = Array.isArray(payloadEnabledServers) && payloadEnabledServers.length > 0
+    ? new Set(payloadEnabledServers)
+    : null;
+  const enabledServers = requestEnabledServers ?? envEnabledServers;
   return Object.entries(DEFAULT_MCP_SERVER_URLS)
     .filter(([name]) => !enabledServers || enabledServers.has(name))
     .map(([name, fallback]) => {
@@ -308,8 +316,8 @@ function getSelectedMcpServerEntries(appConfig) {
     });
 }
 
-function buildCopilotMcpPayload(appConfig) {
-  const selectedEntries = getSelectedMcpServerEntries(appConfig);
+function buildCopilotMcpPayload(appConfig, payloadEnabledServers = null) {
+  const selectedEntries = getSelectedMcpServerEntries(appConfig, payloadEnabledServers);
   return {
     mcpServers: Object.fromEntries(
       selectedEntries.map(([name, url]) => {
@@ -326,14 +334,14 @@ function buildCopilotMcpPayload(appConfig) {
   };
 }
 
-function buildCodexConfigToml(appConfig) {
+function buildCodexConfigToml(appConfig, payloadEnabledServers = null) {
   const escapeToml = (value) => String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
   const lines = [
     `[projects."${escapeToml(runtimeRoot)}"]`,
     'trust_level = "trusted"',
     "",
   ];
-  const selectedEntries = getSelectedMcpServerEntries(appConfig);
+  const selectedEntries = getSelectedMcpServerEntries(appConfig, payloadEnabledServers);
 
   for (const [name, url] of selectedEntries) {
     lines.push(`[mcp_servers.${name}]`);
@@ -344,18 +352,18 @@ function buildCodexConfigToml(appConfig) {
   return `${lines.join("\n").trim()}\n`;
 }
 
-async function ensureCodexHomeConfig(appConfig) {
+async function ensureCodexHomeConfig(appConfig, payloadEnabledServers = null) {
   const configPath = `${appConfig.codexHome}/config.toml`;
-  const payload = buildCodexConfigToml(appConfig);
+  const payload = buildCodexConfigToml(appConfig, payloadEnabledServers);
   await writeFile(configPath, payload, "utf8");
 }
 
-async function ensureCopilotWorkspaceSettings(appConfig, workspacePath, reasoningEffort) {
+async function ensureCopilotWorkspaceSettings(appConfig, workspacePath, reasoningEffort, payloadEnabledServers = null) {
   const settingsDir = `${workspacePath}/.github/copilot`;
   const settingsPath = `${settingsDir}/settings.local.json`;
   const workspaceMcpConfigPath = `${workspacePath}/.mcp.json`;
   const settingsPayload = reasoningEffort ? { effortLevel: reasoningEffort } : {};
-  const mcpPayload = buildCopilotMcpPayload(appConfig);
+  const mcpPayload = buildCopilotMcpPayload(appConfig, payloadEnabledServers);
 
   await mkdir(settingsDir, { recursive: true });
   await writeFile(settingsPath, `${JSON.stringify(settingsPayload, null, 2)}\n`, "utf8");
