@@ -197,6 +197,14 @@ function buildRuntimePath(relativePath) {
   return `${runtimeRoot.replace(/\/+$/, "")}/${normalized}`;
 }
 
+const DEFAULT_MCP_SERVER_URLS = {
+  GithubPerso: "https://mcp-github-client-proxy.vercel.app/mcp",
+  DBanalyzer: "https://mcp-dbanalyzer-client-proxy.vercel.app/mcp",
+  DBworker: "https://mcp-dbworker-client-proxy.vercel.app/mcp",
+  MCPcompetencies: "https://mcp-personal-competencies-client-pr.vercel.app/mcp",
+  Moodle: "https://mcp-moodle-client-proxy.vercel.app/mcp",
+};
+
 async function resolveAppConfig(appId) {
   const registry = await appRegistryPromise;
   const app = registry.get(appId);
@@ -268,17 +276,11 @@ async function ensureAppPaths(appConfig, workspacePath) {
   await mkdir(appConfig.copilotHome, { recursive: true });
   await mkdir(appConfig.workspaceRoot, { recursive: true });
   await mkdir(workspacePath, { recursive: true });
+  await ensureCodexHomeConfig(appConfig);
 }
 
-function buildCopilotMcpPayload(appConfig) {
+function getSelectedMcpServerEntries(appConfig) {
   const prefix = appConfig.copilotMcpEnvPrefix;
-  const defaults = {
-    GithubPerso: "https://mcp-github-client-proxy.vercel.app/mcp",
-    DBanalyzer: "https://mcp-dbanalyzer-client-proxy.vercel.app/mcp",
-    DBworker: "https://mcp-dbworker-client-proxy.vercel.app/mcp",
-    MCPcompetencies: "https://mcp-personal-competencies-client-pr.vercel.app/mcp",
-    Moodle: "https://mcp-moodle-client-proxy.vercel.app/mcp",
-  };
   const enabledServersRaw = process.env[`${prefix}_COPILOT_ENABLED_SERVERS`]?.trim() ?? "";
   const enabledServers = enabledServersRaw
     ? new Set(
@@ -288,33 +290,64 @@ function buildCopilotMcpPayload(appConfig) {
           .filter(Boolean),
       )
     : null;
-  const selectedEntries = Object.entries(defaults).filter(([name]) => !enabledServers || enabledServers.has(name));
+  return Object.entries(DEFAULT_MCP_SERVER_URLS)
+    .filter(([name]) => !enabledServers || enabledServers.has(name))
+    .map(([name, fallback]) => {
+      const envName =
+        name === "GithubPerso"
+          ? `${prefix}_COPILOT_MCP_GITHUB_URL`
+          : name === "DBanalyzer"
+            ? `${prefix}_COPILOT_MCP_DBANALYZER_URL`
+            : name === "DBworker"
+              ? `${prefix}_COPILOT_MCP_DBWORKER_URL`
+              : name === "MCPcompetencies"
+                ? `${prefix}_COPILOT_MCP_COMPETENCIES_URL`
+                : `${prefix}_COPILOT_MCP_MOODLE_URL`;
 
+      return [name, process.env[envName]?.trim() || fallback];
+    });
+}
+
+function buildCopilotMcpPayload(appConfig) {
+  const selectedEntries = getSelectedMcpServerEntries(appConfig);
   return {
     mcpServers: Object.fromEntries(
-      selectedEntries.map(([name, fallback]) => {
-        const envName =
-          name === "GithubPerso"
-            ? `${prefix}_COPILOT_MCP_GITHUB_URL`
-            : name === "DBanalyzer"
-              ? `${prefix}_COPILOT_MCP_DBANALYZER_URL`
-              : name === "DBworker"
-                ? `${prefix}_COPILOT_MCP_DBWORKER_URL`
-                : name === "MCPcompetencies"
-                  ? `${prefix}_COPILOT_MCP_COMPETENCIES_URL`
-                  : `${prefix}_COPILOT_MCP_MOODLE_URL`;
-
+      selectedEntries.map(([name, url]) => {
         return [
           name,
           {
             type: "http",
-            url: process.env[envName]?.trim() || fallback,
+            url,
             tools: ["*"],
           },
         ];
       }),
     ),
   };
+}
+
+function buildCodexConfigToml(appConfig) {
+  const escapeToml = (value) => String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
+  const lines = [
+    `[projects."${escapeToml(runtimeRoot)}"]`,
+    'trust_level = "trusted"',
+    "",
+  ];
+  const selectedEntries = getSelectedMcpServerEntries(appConfig);
+
+  for (const [name, url] of selectedEntries) {
+    lines.push(`[mcp_servers.${name}]`);
+    lines.push(`url = "${escapeToml(url)}"`);
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+async function ensureCodexHomeConfig(appConfig) {
+  const configPath = `${appConfig.codexHome}/config.toml`;
+  const payload = buildCodexConfigToml(appConfig);
+  await writeFile(configPath, payload, "utf8");
 }
 
 async function ensureCopilotWorkspaceSettings(appConfig, workspacePath, reasoningEffort) {
