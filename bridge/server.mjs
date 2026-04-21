@@ -1,7 +1,7 @@
 import { createWriteStream } from "node:fs";
-import { cp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 
@@ -129,6 +129,7 @@ const server = createServer(async (request, response) => {
 
     await ensureAppPaths(appConfig, workspacePath, payload.enabledMcpServers);
     await materializeAttachedFiles(appConfig, workspacePath, payload.chatId, payload.attachmentIds);
+    await resetGeneratedFilesDirectory(workspacePath);
 
     if (payload.engine === "copilot") {
       await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, payload.enabledMcpServers);
@@ -163,7 +164,7 @@ const server = createServer(async (request, response) => {
       response.end(error.message);
     });
 
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
       const errorMessage = stderrBuffer.trim();
 
       if (code && !response.writableEnded) {
@@ -180,6 +181,11 @@ const server = createServer(async (request, response) => {
             message: errorMessage,
           })}\n`,
         );
+      } else if (!response.writableEnded) {
+        const generatedFiles = await collectGeneratedFiles(appConfig, workspacePath, payload.chatId);
+        for (const file of generatedFiles) {
+          response.write(`${JSON.stringify({ type: "generated_file", file })}\n`);
+        }
       }
 
       response.end();
@@ -497,6 +503,70 @@ async function materializeAttachedFiles(appConfig, workspacePath, chatId, attach
   }
 
   await writeFile(join(attachmentDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+async function resetGeneratedFilesDirectory(workspacePath) {
+  const generatedDir = join(workspacePath, "__generated_files__");
+  await rm(generatedDir, { recursive: true, force: true });
+  await mkdir(generatedDir, { recursive: true });
+}
+
+async function collectGeneratedFiles(appConfig, workspacePath, chatId) {
+  const generatedDir = join(workspacePath, "__generated_files__");
+  let entries = [];
+
+  try {
+    entries = await readdir(generatedDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const generatedFiles = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const sourcePath = join(generatedDir, entry.name);
+    const sourceStat = await stat(sourcePath);
+    const content = await readFile(sourcePath);
+    const fileId = randomUUID();
+    const fileDirectory = getFileDirectory(appConfig, chatId, fileId);
+    const blobPath = join(fileDirectory, "blob");
+    const metaPath = join(fileDirectory, "meta.json");
+    const originalName = sanitizeDisplayName(entry.name);
+    const contentType = detectGeneratedFileContentType(originalName);
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    const metadata = {
+      id: fileId,
+      chatId,
+      originalName,
+      storedName: "blob",
+      contentType,
+      size: Number(sourceStat.size ?? content.byteLength),
+      sha256,
+      createdAt: new Date().toISOString(),
+    };
+
+    await mkdir(fileDirectory, { recursive: true });
+    await cp(sourcePath, blobPath, { force: true });
+    await writeFile(metaPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+    generatedFiles.push(metadata);
+  }
+
+  return generatedFiles;
+}
+
+function detectGeneratedFileContentType(filename) {
+  const lower = String(filename).toLowerCase();
+  if (lower.endsWith(".xml")) {
+    return "application/xml";
+  }
+  if (lower.endsWith(".txt") || lower.endsWith(".aiken")) {
+    return "text/plain; charset=utf-8";
+  }
+  return "application/octet-stream";
 }
 
 function getUniqueAttachmentName(inputName, usedNames) {

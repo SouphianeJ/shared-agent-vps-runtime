@@ -7,6 +7,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 - l'image Docker commune `codex + copilot`
 - le bridge HTTP signe expose sur `/codex/*`
 - l'upload direct de fichiers expose sur `/codex/files/*`
+- la recolte des fichiers generes depuis `__generated_files__/` en fin de run
 - la configuration multi-app du runtime
 - les scripts de bootstrap/deploiement VPS
 - le workflow GitHub Actions de deploiement
@@ -17,6 +18,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 - un `appId` obligatoire pour chaque requete bridge
 - etats `Codex`, `Copilot` et workspaces separes par application
 - configuration MCP Copilot uniquement dans le workspace via `.mcp.json`
+- convention de sortie utilisateur via `__generated_files__/` dans le workspace
 - bibliotheque de fichiers persistants par app/chat dans `file-library`
 
 ## Applications declarees
