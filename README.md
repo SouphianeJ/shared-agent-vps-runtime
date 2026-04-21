@@ -6,6 +6,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 
 - l'image Docker commune `codex + copilot`
 - le bridge HTTP signe expose sur `/codex/*`
+- l'upload direct de fichiers expose sur `/codex/files/*`
 - la configuration multi-app du runtime
 - les scripts de bootstrap/deploiement VPS
 - le workflow GitHub Actions de deploiement
@@ -16,6 +17,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 - un `appId` obligatoire pour chaque requete bridge
 - etats `Codex`, `Copilot` et workspaces separes par application
 - configuration MCP Copilot uniquement dans le workspace via `.mcp.json`
+- bibliotheque de fichiers persistants par app/chat dans `file-library`
 
 ## Applications declarees
 
@@ -51,6 +53,7 @@ Voir [.env.example](./.env.example).
 
 Pour `moodle-actions`, utiliser l'app id `moodle-actions` et, si besoin, surcharger les URLs MCP Copilot avec le prefix `MOODLE_ACTIONS_`.
 Pour limiter le nombre de tools exposes a Copilot, utiliser `MOODLE_ACTIONS_COPILOT_ENABLED_SERVERS=Moodle`.
+Pour limiter la taille des uploads fichiers, utiliser `CHAT_UPLOAD_MAX_BYTES`.
 
 ## Auth Codex via R2
 

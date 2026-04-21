@@ -1,4 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { cp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -10,6 +12,7 @@ const nonceTtlSeconds = Number.parseInt(process.env.PROXY_NONCE_TTL_SECONDS ?? "
 const runtimeRoot = process.env.RUNTIME_ROOT ?? "/runtime";
 const runtimeAppsConfigPath = process.env.RUNTIME_APPS_CONFIG ?? "/app/config/apps.json";
 const defaultModel = process.env.CODEX_MODEL ?? "";
+const chatUploadMaxBytes = Number.parseInt(process.env.CHAT_UPLOAD_MAX_BYTES ?? "0", 10);
 const allowDangerousDefault = /^(1|true|yes|on)$/i.test(process.env.CODEX_ALLOW_DANGEROUS ?? "true");
 
 const keyRegistry = new Map();
@@ -32,12 +35,21 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url === "/codex/health" && request.method === "GET") {
+    const requestUrl = new URL(request.url, `http://${request.headers.host ?? "127.0.0.1"}`);
+
+    if (requestUrl.pathname === "/codex/files/upload" && request.method === "OPTIONS") {
+      writeCorsHeaders(response, request.headers.origin);
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/health" && request.method === "GET") {
       const rawBody = Buffer.alloc(0);
       const headers = normalizeHeaders(request.headers);
       const validationError = validateSignedRequest({
         method: request.method,
-        path: request.url,
+        path: requestUrl.pathname,
         headers,
         rawBody,
       });
@@ -54,7 +66,44 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url !== "/codex/run" || request.method !== "POST") {
+    if (requestUrl.pathname === "/codex/files/upload" && request.method === "PUT") {
+      writeCorsHeaders(response, request.headers.origin);
+      const upload = validateUploadRequest(request, requestUrl);
+      const appConfig = await resolveAppConfig(upload.appId);
+      const fileDirectory = getFileDirectory(appConfig, upload.chatId, upload.fileId);
+      const writtenFile = await streamUploadToDisk(request, fileDirectory, upload);
+
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(writtenFile));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/files" && request.method === "DELETE") {
+      const rawBody = await readRequestBody(request);
+      const headers = normalizeHeaders(request.headers);
+      const validationError = validateSignedRequest({
+        method: request.method,
+        path: requestUrl.pathname,
+        headers,
+        rawBody,
+      });
+
+      if (validationError) {
+        response.writeHead(validationError.status, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(validationError.message);
+        return;
+      }
+
+      const payload = parseFileDeletePayload(rawBody);
+      const appConfig = await resolveAppConfig(payload.appId);
+      await rm(getFileDirectory(appConfig, payload.chatId, payload.fileId), { recursive: true, force: true });
+
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ ok: true, fileId: payload.fileId }));
+      return;
+    }
+
+    if (requestUrl.pathname !== "/codex/run" || request.method !== "POST") {
       response.writeHead(404).end("Not found");
       return;
     }
@@ -63,7 +112,7 @@ const server = createServer(async (request, response) => {
     const headers = normalizeHeaders(request.headers);
     const validationError = validateSignedRequest({
       method: request.method,
-      path: request.url,
+      path: requestUrl.pathname,
       headers,
       rawBody,
     });
@@ -79,6 +128,7 @@ const server = createServer(async (request, response) => {
     const workspacePath = buildWorkspacePath(appConfig, payload.chatId);
 
     await ensureAppPaths(appConfig, workspacePath, payload.enabledMcpServers);
+    await materializeAttachedFiles(appConfig, workspacePath, payload.chatId, payload.attachmentIds);
 
     if (payload.engine === "copilot") {
       await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, payload.enabledMcpServers);
@@ -171,16 +221,19 @@ async function loadAppRegistry() {
         throw new Error("Invalid app id in runtime apps config.");
       }
 
+      const appHome = buildRuntimePath(String(app.paths?.appHome ?? ""));
+
       return [
         appId,
         {
           id: appId,
           displayName: String(app.displayName ?? appId),
           copilotMcpEnvPrefix: String(app.copilotMcpEnvPrefix ?? "").trim(),
-          appHome: buildRuntimePath(String(app.paths?.appHome ?? "")),
+          appHome,
           codexHome: buildRuntimePath(String(app.paths?.codexHome ?? "")),
           copilotHome: buildRuntimePath(String(app.paths?.copilotHome ?? "")),
           workspaceRoot: buildRuntimePath(String(app.paths?.workspaceRoot ?? "")),
+          fileLibraryRoot: `${appHome}/file-library`,
         },
       ];
     }),
@@ -244,6 +297,9 @@ function parsePayload(rawBody) {
   const enabledMcpServers = Array.isArray(payload.enabledMcpServers)
     ? payload.enabledMcpServers.map((value) => String(value ?? "").trim()).filter(Boolean)
     : null;
+  const attachmentIds = Array.isArray(payload.attachmentIds)
+    ? payload.attachmentIds.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : [];
 
   if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
     throw new Error("Invalid app id.");
@@ -267,11 +323,44 @@ function parsePayload(rawBody) {
     reasoningEffort,
     allowBypassSandbox,
     enabledMcpServers,
+    attachmentIds,
   };
+}
+
+function parseFileDeletePayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+  const chatId = typeof payload?.chatId === "string" ? payload.chatId.trim() : "";
+  const fileId = typeof payload?.fileId === "string" ? payload.fileId.trim() : "";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(chatId)) {
+    throw new Error("Invalid chat id.");
+  }
+
+  if (!/^[a-f0-9-]{36}$/i.test(fileId)) {
+    throw new Error("Invalid file id.");
+  }
+
+  return { appId, chatId, fileId };
 }
 
 function buildWorkspacePath(appConfig, chatId) {
   return `${appConfig.workspaceRoot.replace(/\/+$/, "")}/${chatId}`;
+}
+
+function getFileDirectory(appConfig, chatId, fileId) {
+  return join(appConfig.fileLibraryRoot, "chats", chatId, fileId);
 }
 
 async function ensureAppPaths(appConfig, workspacePath, payloadEnabledServers = null) {
@@ -280,6 +369,7 @@ async function ensureAppPaths(appConfig, workspacePath, payloadEnabledServers = 
   await mkdir(appConfig.copilotHome, { recursive: true });
   await mkdir(appConfig.workspaceRoot, { recursive: true });
   await mkdir(workspacePath, { recursive: true });
+  await mkdir(join(appConfig.fileLibraryRoot, "chats"), { recursive: true });
   await ensureCodexHomeConfig(appConfig, payloadEnabledServers);
 }
 
@@ -318,6 +408,7 @@ function getSelectedMcpServerEntries(appConfig, payloadEnabledServers = null) {
 
 function buildCopilotMcpPayload(appConfig, payloadEnabledServers = null) {
   const selectedEntries = getSelectedMcpServerEntries(appConfig, payloadEnabledServers);
+
   return {
     mcpServers: Object.fromEntries(
       selectedEntries.map(([name, url]) => {
@@ -368,6 +459,67 @@ async function ensureCopilotWorkspaceSettings(appConfig, workspacePath, reasonin
   await mkdir(settingsDir, { recursive: true });
   await writeFile(settingsPath, `${JSON.stringify(settingsPayload, null, 2)}\n`, "utf8");
   await writeFile(workspaceMcpConfigPath, `${JSON.stringify(mcpPayload, null, 2)}\n`, "utf8");
+}
+
+async function materializeAttachedFiles(appConfig, workspacePath, chatId, attachmentIds) {
+  const attachmentDir = join(workspacePath, "__attached_files__");
+  await rm(attachmentDir, { recursive: true, force: true });
+  await mkdir(attachmentDir, { recursive: true });
+
+  const manifest = [];
+  const usedNames = new Set();
+
+  for (const fileId of attachmentIds) {
+    const fileDirectory = getFileDirectory(appConfig, chatId, fileId);
+    const metaPath = join(fileDirectory, "meta.json");
+    const blobPath = join(fileDirectory, "blob");
+    let meta;
+
+    try {
+      meta = JSON.parse(await readFile(metaPath, "utf8"));
+    } catch {
+      continue;
+    }
+
+    const targetName = getUniqueAttachmentName(meta.originalName || fileId, usedNames);
+    const targetPath = join(attachmentDir, targetName);
+
+    try {
+      await symlink(blobPath, targetPath);
+    } catch {
+      await cp(blobPath, targetPath, { force: true });
+    }
+
+    manifest.push({
+      ...meta,
+      mountedName: targetName,
+    });
+  }
+
+  await writeFile(join(attachmentDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+function getUniqueAttachmentName(inputName, usedNames) {
+  const safeName = sanitizeDisplayName(inputName);
+  let candidate = safeName;
+  let counter = 2;
+
+  while (usedNames.has(candidate)) {
+    candidate = `${safeName} (${counter})`;
+    counter += 1;
+  }
+
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function sanitizeDisplayName(inputName) {
+  const collapsed = basename(String(inputName || "file"))
+    .replace(/[/\\?%*:|"<>]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return collapsed || "file";
 }
 
 function spawnAgent(payload, appConfig, workspacePath) {
@@ -475,6 +627,159 @@ function validateSignedRequest({ method, path, headers, rawBody }) {
 
   nonceCache.set(`${keyId}:${nonce}`, Date.now() + nonceTtlSeconds * 1000);
   return null;
+}
+
+function validateUploadRequest(request, requestUrl) {
+  const uploadToken = typeof request.headers["x-upload-token"] === "string" ? request.headers["x-upload-token"] : "";
+  const filenameHeader = typeof request.headers["x-upload-filename"] === "string" ? request.headers["x-upload-filename"] : "";
+  const contentTypeHeader = typeof request.headers["x-upload-content-type"] === "string" ? request.headers["x-upload-content-type"] : "";
+
+  if (!uploadToken) {
+    throw new Error("Missing upload token.");
+  }
+
+  const parsedToken = parseUploadToken(uploadToken);
+  const appId = requestUrl.searchParams.get("appId")?.trim() ?? "";
+  const chatId = requestUrl.searchParams.get("chatId")?.trim() ?? "";
+  const fileId = requestUrl.searchParams.get("fileId")?.trim() ?? "";
+
+  if (
+    parsedToken.appId !== appId ||
+    parsedToken.chatId !== chatId ||
+    parsedToken.fileId !== fileId
+  ) {
+    throw new Error("Upload token does not match request target.");
+  }
+
+  return {
+    appId,
+    chatId,
+    fileId,
+    filename: decodeURIComponent(filenameHeader || parsedToken.filename),
+    contentType: contentTypeHeader || parsedToken.contentType || "application/octet-stream",
+    expectedSize: parsedToken.size,
+  };
+}
+
+function parseUploadToken(token) {
+  const [encodedPayload, signature] = String(token).split(".");
+
+  if (!encodedPayload || !signature) {
+    throw new Error("Invalid upload token.");
+  }
+
+  const serializedPayload = Buffer.from(encodedPayload, "base64url").toString("utf8");
+  let payload;
+
+  try {
+    payload = JSON.parse(serializedPayload);
+  } catch {
+    throw new Error("Invalid upload token payload.");
+  }
+
+  const matchedSecret = Array.from(keyRegistry.values()).find((secret) => {
+    const expectedSignature = createHmac("sha256", secret).update(serializedPayload).digest("base64url");
+    return safeEqual(signature, expectedSignature);
+  });
+
+  if (!matchedSecret) {
+    throw new Error("Invalid upload token signature.");
+  }
+
+  if (payload?.v !== "v1") {
+    throw new Error("Unsupported upload token version.");
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(payload?.appId ?? "")) {
+    throw new Error("Invalid upload token app id.");
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(payload?.chatId ?? "")) {
+    throw new Error("Invalid upload token chat id.");
+  }
+
+  if (!/^[a-f0-9-]{36}$/i.test(payload?.fileId ?? "")) {
+    throw new Error("Invalid upload token file id.");
+  }
+
+  if (typeof payload.exp !== "number" || Math.floor(Date.now() / 1000) > payload.exp) {
+    throw new Error("Expired upload token.");
+  }
+
+  return payload;
+}
+
+async function streamUploadToDisk(request, fileDirectory, upload) {
+  await mkdir(fileDirectory, { recursive: true });
+  const tempPath = join(fileDirectory, "blob.uploading");
+  const blobPath = join(fileDirectory, "blob");
+  const metaPath = join(fileDirectory, "meta.json");
+  await rm(tempPath, { force: true });
+
+  const hash = createHash("sha256");
+  let size = 0;
+
+  await new Promise((resolve, reject) => {
+    const output = createWriteStream(tempPath);
+
+    request.on("data", (chunk) => {
+      size += chunk.length;
+
+      if (chatUploadMaxBytes > 0 && size > chatUploadMaxBytes) {
+        request.destroy(new Error(`Upload exceeds the configured limit of ${chatUploadMaxBytes} bytes.`));
+        return;
+      }
+
+      if (typeof upload.expectedSize === "number" && upload.expectedSize >= 0 && size > upload.expectedSize) {
+        request.destroy(new Error("Upload exceeds ticket size."));
+        return;
+      }
+
+      hash.update(chunk);
+    });
+
+    request.on("error", reject);
+    output.on("error", reject);
+    output.on("finish", resolve);
+    request.pipe(output);
+  }).catch(async (error) => {
+    await rm(tempPath, { force: true });
+    throw error;
+  });
+
+  if (typeof upload.expectedSize === "number" && upload.expectedSize >= 0 && size !== upload.expectedSize) {
+    await rm(tempPath, { force: true });
+    throw new Error("Upload size does not match ticket size.");
+  }
+
+  const sha256 = hash.digest("hex");
+  const metadata = {
+    id: upload.fileId,
+    chatId: upload.chatId,
+    originalName: sanitizeDisplayName(upload.filename),
+    storedName: "blob",
+    contentType: upload.contentType,
+    size,
+    sha256,
+    createdAt: new Date().toISOString(),
+  };
+
+  await rename(tempPath, blobPath);
+  await writeFile(metaPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+
+  return {
+    ok: true,
+    fileId: upload.fileId,
+    size,
+    sha256,
+  };
+}
+
+function writeCorsHeaders(response, origin) {
+  response.setHeader("Access-Control-Allow-Origin", origin || "*");
+  response.setHeader("Access-Control-Allow-Methods", "PUT, OPTIONS");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Upload-Token, X-Upload-Filename, X-Upload-Content-Type");
+  response.setHeader("Vary", "Origin");
 }
 
 function normalizeHeaders(headers) {
