@@ -1,3 +1,17 @@
+@codex_preflight_allowed {
+  path /codex/*
+  method OPTIONS
+  header_regexp Origin ^(http://localhost:3000|http://localhost:3001|https://vps-personal-ai\.vercel\.app|https://vps-personal-codex\.vercel\.app)$
+}
+
+handle @codex_preflight_allowed {
+  header Access-Control-Allow-Origin "{header.Origin}"
+  header Access-Control-Allow-Methods "POST, GET, PUT, DELETE, OPTIONS"
+  header Access-Control-Allow-Headers "Authorization, Content-Type, X-Proxy-Key-Id, X-Proxy-Timestamp, X-Proxy-Nonce, X-Proxy-Body-Sha256, X-Proxy-Signature, X-Upload-Token, X-Upload-Filename, X-Upload-Content-Type"
+  header Access-Control-Max-Age "86400"
+  respond "" 204
+}
+
 handle /codex/* {
   reverse_proxy 127.0.0.1:11437
 }
