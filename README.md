@@ -8,6 +8,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 - le bridge HTTP signe expose sur `/codex/*`
 - l'upload direct de fichiers expose sur `/codex/files/*`
 - la recolte des fichiers generes depuis `__generated_files__/` en fin de run
+- l'emission d'evenements NDJSON `generated_file` avec metadonnees persistables (`fileId`, `originalName`, `contentType`, `size`, `sha256`)
 - la configuration multi-app du runtime
 - les scripts de bootstrap/deploiement VPS
 - le workflow GitHub Actions de deploiement

@@ -540,6 +540,7 @@ async function collectGeneratedFiles(appConfig, workspacePath, chatId) {
     const sha256 = createHash("sha256").update(content).digest("hex");
     const metadata = {
       id: fileId,
+      fileId,
       chatId,
       originalName,
       storedName: "blob",
