@@ -106,7 +106,6 @@ auth_r2_restore() {
   fi
 
   echo "R2 auth restore skipped for $app: object not found at s3://$R2_BUCKET/$object_key" >&2
-  rm -f "$auth_path"
   return 0
 }
 

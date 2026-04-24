@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
@@ -14,9 +14,15 @@ const runtimeAppsConfigPath = process.env.RUNTIME_APPS_CONFIG ?? "/app/config/ap
 const defaultModel = process.env.CODEX_MODEL ?? "";
 const chatUploadMaxBytes = Number.parseInt(process.env.CHAT_UPLOAD_MAX_BYTES ?? "0", 10);
 const allowDangerousDefault = /^(1|true|yes|on)$/i.test(process.env.CODEX_ALLOW_DANGEROUS ?? "true");
+const r2Bucket = process.env.R2_BUCKET ?? "";
+const r2Endpoint = process.env.R2_ENDPOINT ?? "";
+const r2AccessKeyId = process.env.R2_ACCESS_KEY_ID ?? process.env.AWS_ACCESS_KEY_ID ?? "";
+const r2SecretAccessKey = process.env.R2_SECRET_ACCESS_KEY ?? process.env.AWS_SECRET_ACCESS_KEY ?? "";
+const r2AuthPrefix = process.env.R2_CODEX_AUTH_PREFIX ?? "codex-auth";
 
 const keyRegistry = new Map();
 const nonceCache = new Map();
+const runQueueByKey = new Map();
 const appRegistryPromise = loadAppRegistry();
 
 registerKey(process.env.PROXY_KEY_ID_ACTIVE, process.env.PROXY_SIGNING_KEY_ACTIVE);
@@ -126,74 +132,12 @@ const server = createServer(async (request, response) => {
     const payload = parsePayload(rawBody);
     const appConfig = await resolveAppConfig(payload.appId);
     const workspacePath = buildWorkspacePath(appConfig, payload.chatId);
+    const runHandler = () => handleRunRequest(payload, appConfig, workspacePath, response);
 
-    await ensureAppPaths(appConfig, workspacePath, payload.enabledMcpServers);
-    await materializeAttachedFiles(appConfig, workspacePath, payload.chatId, payload.attachmentIds);
-    await resetGeneratedFilesDirectory(workspacePath);
-
-    if (payload.engine === "copilot") {
-      await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, payload.enabledMcpServers);
-    }
-
-    response.writeHead(200, {
-      "Content-Type": "application/x-ndjson; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    });
-
-    const child = spawnAgent(payload, appConfig, workspacePath);
-    let stderrBuffer = "";
-    let sawStdout = false;
-
-    child.stdout.on("data", (chunk) => {
-      sawStdout = true;
-      response.write(chunk);
-    });
-
-    child.stderr.on("data", (chunk) => {
-      const message = chunk.toString();
-      stderrBuffer += message;
-      console.error(message);
-    });
-
-    child.on("error", (error) => {
-      if (!response.headersSent) {
-        response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-      }
-
-      response.end(error.message);
-    });
-
-    child.on("close", async (code) => {
-      const errorMessage = stderrBuffer.trim();
-
-      if (code && !response.writableEnded) {
-        response.write(
-          `${JSON.stringify({
-            type: "error",
-            message: errorMessage || `Agent process exited with status ${code}.`,
-          })}\n`,
-        );
-      } else if (!sawStdout && errorMessage && !response.writableEnded) {
-        response.write(
-          `${JSON.stringify({
-            type: "error",
-            message: errorMessage,
-          })}\n`,
-        );
-      } else if (!response.writableEnded) {
-        const generatedFiles = await collectGeneratedFiles(appConfig, workspacePath, payload.chatId);
-        for (const file of generatedFiles) {
-          response.write(`${JSON.stringify({ type: "generated_file", file })}\n`);
-        }
-      }
-
-      response.end();
-    });
-
-    if (payload.engine === "codex") {
-      child.stdin.write(payload.prompt);
-      child.stdin.end();
+    if (shouldSerializeCodexRuns(payload)) {
+      await enqueueSerializedRun(`codex:${payload.appId}`, runHandler);
+    } else {
+      await runHandler();
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected bridge error";
@@ -367,6 +311,109 @@ function buildWorkspacePath(appConfig, chatId) {
 
 function getFileDirectory(appConfig, chatId, fileId) {
   return join(appConfig.fileLibraryRoot, "chats", chatId, fileId);
+}
+
+async function handleRunRequest(payload, appConfig, workspacePath, response) {
+  await ensureAppPaths(appConfig, workspacePath, payload.enabledMcpServers);
+
+  if (shouldSyncCodexAuth(payload)) {
+    await restoreCodexAuthFromR2(appConfig);
+  }
+
+  await materializeAttachedFiles(appConfig, workspacePath, payload.chatId, payload.attachmentIds);
+  await resetGeneratedFilesDirectory(workspacePath);
+
+  if (payload.engine === "copilot") {
+    await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, payload.enabledMcpServers);
+  }
+
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+  });
+
+  await new Promise((resolve) => {
+    const child = spawnAgent(payload, appConfig, workspacePath);
+    let stderrBuffer = "";
+    let sawStdout = false;
+    let finalized = false;
+
+    const finalize = async (code = 0, processError = null) => {
+      if (finalized) {
+        return;
+      }
+
+      finalized = true;
+      const errorMessage = processError?.message?.trim() || stderrBuffer.trim();
+
+      try {
+        if (shouldSyncCodexAuth(payload)) {
+          await uploadCodexAuthToR2(appConfig);
+        }
+      } catch (authError) {
+        console.error(authError instanceof Error ? authError.message : String(authError));
+      }
+
+      if (processError && !response.headersSent) {
+        response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(processError.message);
+        resolve();
+        return;
+      }
+
+      if (code && !response.writableEnded) {
+        response.write(
+          `${JSON.stringify({
+            type: "error",
+            message: errorMessage || `Agent process exited with status ${code}.`,
+          })}\n`,
+        );
+      } else if (!sawStdout && errorMessage && !response.writableEnded) {
+        response.write(
+          `${JSON.stringify({
+            type: "error",
+            message: errorMessage,
+          })}\n`,
+        );
+      } else if (!response.writableEnded) {
+        const generatedFiles = await collectGeneratedFiles(appConfig, workspacePath, payload.chatId);
+        for (const file of generatedFiles) {
+          response.write(`${JSON.stringify({ type: "generated_file", file })}\n`);
+        }
+      }
+
+      if (!response.writableEnded) {
+        response.end();
+      }
+
+      resolve();
+    };
+
+    child.stdout.on("data", (chunk) => {
+      sawStdout = true;
+      response.write(chunk);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const message = chunk.toString();
+      stderrBuffer += message;
+      console.error(message);
+    });
+
+    child.on("error", (error) => {
+      void finalize(1, error);
+    });
+
+    child.on("close", (code) => {
+      void finalize(code ?? 0, null);
+    });
+
+    if (payload.engine === "codex") {
+      child.stdin.write(payload.prompt);
+      child.stdin.end();
+    }
+  });
 }
 
 async function ensureAppPaths(appConfig, workspacePath, payloadEnabledServers = null) {
@@ -644,6 +691,131 @@ function spawnAgent(payload, appConfig, workspacePath) {
     env: runtimeEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
+}
+
+function shouldSerializeCodexRuns(payload) {
+  return shouldSyncCodexAuth(payload);
+}
+
+function shouldSyncCodexAuth(payload) {
+  return payload.engine === "codex" && Boolean(r2Bucket && r2Endpoint && r2AccessKeyId && r2SecretAccessKey);
+}
+
+function enqueueSerializedRun(queueKey, task) {
+  const previous = runQueueByKey.get(queueKey) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  const tail = next.finally(() => {
+    if (runQueueByKey.get(queueKey) === tail) {
+      runQueueByKey.delete(queueKey);
+    }
+  });
+  runQueueByKey.set(queueKey, tail);
+  return next;
+}
+
+function authObjectKeyForApp(appId) {
+  const envName = `${appId.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "")}_CODEX_AUTH_OBJECT_KEY`;
+  const override = process.env[envName]?.trim();
+  if (override) {
+    return override;
+  }
+
+  return `${r2AuthPrefix.replace(/\/+$/, "")}/${appId}/auth.json`;
+}
+
+function authAwsEnv() {
+  return {
+    ...process.env,
+    AWS_ACCESS_KEY_ID: r2AccessKeyId,
+    AWS_SECRET_ACCESS_KEY: r2SecretAccessKey,
+    AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION ?? "auto",
+    AWS_EC2_METADATA_DISABLED: "true",
+  };
+}
+
+function runAwsCommand(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("aws", args, {
+      env: authAwsEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      reject(new Error(stderr.trim() || stdout.trim() || `aws exited with status ${code}`));
+    });
+  });
+}
+
+async function restoreCodexAuthFromR2(appConfig) {
+  const authPath = `${appConfig.codexHome}/auth.json`;
+  const tempPath = `${authPath}.download`;
+  const objectKey = authObjectKeyForApp(appConfig.id);
+
+  await mkdir(appConfig.codexHome, { recursive: true });
+  await rm(tempPath, { force: true });
+
+  try {
+    await runAwsCommand([
+      "s3",
+      "cp",
+      `s3://${r2Bucket}/${objectKey}`,
+      tempPath,
+      "--endpoint-url",
+      r2Endpoint,
+      "--only-show-errors",
+    ]);
+    await rename(tempPath, authPath);
+    await chmodSafe(authPath, 0o600);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    console.error(`R2 auth restore skipped for ${appConfig.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function uploadCodexAuthToR2(appConfig) {
+  const authPath = `${appConfig.codexHome}/auth.json`;
+  const objectKey = authObjectKeyForApp(appConfig.id);
+
+  try {
+    await stat(authPath);
+  } catch {
+    return;
+  }
+
+  await runAwsCommand([
+    "s3",
+    "cp",
+    authPath,
+    `s3://${r2Bucket}/${objectKey}`,
+    "--endpoint-url",
+    r2Endpoint,
+    "--only-show-errors",
+  ]);
+}
+
+async function chmodSafe(filePath, mode) {
+  try {
+    await chmod(filePath, mode);
+  } catch {
+    // Ignore chmod failures on environments that don't support POSIX permissions.
+  }
 }
 
 function validateSignedRequest({ method, path, headers, rawBody }) {
