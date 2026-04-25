@@ -1025,9 +1025,20 @@ async function startCopilotAuthSession(appConfig) {
 
   const child = spawn("script", ["-qefc", `copilot login --config-dir ${shellEscapeForPosix(appConfig.copilotHome)}`, "/dev/null"], {
     env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   session.child = child;
+  session.acceptedPlaintextStorage = false;
+
+  setTimeout(() => {
+    if (session.child === child && !session.completed) {
+      try {
+        child.stdin.write("y\n");
+      } catch {
+        // Ignore stdin write failures if the process has already exited.
+      }
+    }
+  }, 1000);
 
   child.stdout.on("data", (chunk) => {
     const text = chunk.toString();
@@ -1079,6 +1090,7 @@ function createCopilotAuthSession(appConfig) {
     error: null,
     stdout: "",
     stderr: "",
+    acceptedPlaintextStorage: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     finishedAt: null,
@@ -1110,6 +1122,16 @@ function consumeCopilotAuthText(session, text) {
     session.status = "completed";
     session.completed = true;
     session.finishedAt = new Date().toISOString();
+  }
+
+  if (!session.acceptedPlaintextStorage && /plaintext (configuration|config) file|store .*token.*config/i.test(combined)) {
+    session.acceptedPlaintextStorage = true;
+
+    try {
+      session.child?.stdin.write("y\n");
+    } catch {
+      // Ignore stdin write failures if the process already exited.
+    }
   }
 
   if (clipboardFailure && session.deviceCode && session.verificationUri) {
@@ -1376,6 +1398,8 @@ function spawnAgent(payload, appConfig, workspacePath) {
   if (payload.engine === "copilot") {
     applyCopilotAuthEnv(runtimeEnv, appConfig);
     const execArgs = [
+      "--config-dir",
+      appConfig.copilotHome,
       "--output-format=json",
       "--allow-all",
       "--no-ask-user",
