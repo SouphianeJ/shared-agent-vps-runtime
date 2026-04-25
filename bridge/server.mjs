@@ -204,6 +204,8 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      await refreshCopilotAuthSessionStatus(session, appConfig);
+
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       response.end(JSON.stringify(serializeCopilotAuthSession(session)));
       return;
@@ -1012,33 +1014,24 @@ async function startCopilotAuthSession(appConfig) {
   const session = createCopilotAuthSession(appConfig);
   activeCopilotAuthSessionsByApp.set(appConfig.id, session);
   await mkdir(appConfig.copilotHome, { recursive: true });
+  await mkdir(join(appConfig.appHome, ".config", "gh"), { recursive: true });
 
   const env = {
     ...process.env,
     HOME: appConfig.appHome,
     COPILOT_HOME: appConfig.copilotHome,
+    GH_CONFIG_DIR: join(appConfig.appHome, ".config", "gh"),
   };
 
   delete env.COPILOT_GITHUB_TOKEN;
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
 
-  const child = spawn("script", ["-qefc", `copilot login --config-dir ${shellEscapeForPosix(appConfig.copilotHome)}`, "/dev/null"], {
+  const child = spawn("gh", ["auth", "login", "--hostname", "github.com", "--web", "--git-protocol", "https", "--scopes", "gist,read:org,read:user,repo"], {
     env,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
   session.child = child;
-  session.acceptedPlaintextStorage = false;
-
-  setTimeout(() => {
-    if (session.child === child && !session.completed) {
-      try {
-        child.stdin.write("y\n");
-      } catch {
-        // Ignore stdin write failures if the process has already exited.
-      }
-    }
-  }, 1000);
 
   child.stdout.on("data", (chunk) => {
     const text = chunk.toString();
@@ -1090,7 +1083,6 @@ function createCopilotAuthSession(appConfig) {
     error: null,
     stdout: "",
     stderr: "",
-    acceptedPlaintextStorage: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     finishedAt: null,
@@ -1102,9 +1094,8 @@ function consumeCopilotAuthText(session, text) {
   session.updatedAt = new Date().toISOString();
 
   const combined = `${session.stdout}\n${session.stderr}`;
-  const codeMatch = combined.match(/enter code ([A-Z0-9-]+)\.?/i);
+  const codeMatch = combined.match(/(?:enter code|one-time code:)\s*([A-Z0-9-]+)\.?/i);
   const urlMatch = combined.match(/https:\/\/github\.com\/login\/device/i);
-  const clipboardFailure = /failed to copy to clipboard/i.test(text);
 
   if (codeMatch) {
     session.deviceCode = codeMatch[1];
@@ -1122,22 +1113,6 @@ function consumeCopilotAuthText(session, text) {
     session.status = "completed";
     session.completed = true;
     session.finishedAt = new Date().toISOString();
-  }
-
-  if (!session.acceptedPlaintextStorage && /plaintext (configuration|config) file|store .*token.*config/i.test(combined)) {
-    session.acceptedPlaintextStorage = true;
-
-    try {
-      session.child?.stdin.write("y\n");
-    } catch {
-      // Ignore stdin write failures if the process already exited.
-    }
-  }
-
-  if (clipboardFailure && session.deviceCode && session.verificationUri) {
-    session.status = "pending_authorization";
-    session.error = null;
-    return;
   }
 
   if (/no authentication information found|bad credentials|resource not accessible|denied|timed out/i.test(text) && !session.completed) {
@@ -1175,10 +1150,6 @@ function serializeCopilotAuthSession(session) {
   };
 }
 
-function shellEscapeForPosix(value) {
-  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
-}
-
 async function waitForCopilotDeviceCode(session, timeoutMs) {
   const start = Date.now();
 
@@ -1189,6 +1160,55 @@ async function waitForCopilotDeviceCode(session, timeoutMs) {
 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+}
+
+async function refreshCopilotAuthSessionStatus(session, appConfig) {
+  if (session.completed || session.status === "failed") {
+    return session;
+  }
+
+  const ghAuthOk = await hasGhAuthSession(appConfig);
+
+  if (ghAuthOk) {
+    session.status = "completed";
+    session.completed = true;
+    session.error = null;
+    session.finishedAt = new Date().toISOString();
+
+    try {
+      session.child?.kill("SIGTERM");
+    } catch {
+      // Ignore kill failures if the process already exited.
+    }
+
+    session.child = null;
+    return session;
+  }
+
+  return session;
+}
+
+async function hasGhAuthSession(appConfig) {
+  const env = {
+    ...process.env,
+    HOME: appConfig.appHome,
+    COPILOT_HOME: appConfig.copilotHome,
+    GH_CONFIG_DIR: join(appConfig.appHome, ".config", "gh"),
+  };
+
+  delete env.COPILOT_GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+
+  return await new Promise((resolve) => {
+    const child = spawn("gh", ["auth", "status", "--hostname", "github.com"], {
+      env,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
 }
 
 async function handleStopRequest(payload, response) {
@@ -1445,17 +1465,15 @@ function spawnAgent(payload, appConfig, workspacePath) {
 
 function applyCopilotAuthEnv(runtimeEnv, appConfig) {
   const appScopedToken = process.env[buildAppScopedCopilotTokenEnvName(appConfig.id)]?.trim() ?? "";
-  const genericCopilotToken = process.env.COPILOT_GITHUB_TOKEN?.trim() ?? "";
-  const selectedToken = appScopedToken || genericCopilotToken;
-
-  if (selectedToken) {
-    runtimeEnv.COPILOT_GITHUB_TOKEN = selectedToken;
+  if (appScopedToken) {
+    runtimeEnv.COPILOT_GITHUB_TOKEN = appScopedToken;
   } else {
     delete runtimeEnv.COPILOT_GITHUB_TOKEN;
   }
 
   // Copilot CLI checks COPILOT_GITHUB_TOKEN first, then GH_TOKEN, then GITHUB_TOKEN.
-  // Removing lower-priority tokens avoids accidental fallback to an unsupported or stale token.
+  // Runtime apps should only receive an explicit app-scoped PAT; otherwise they must fall back
+  // to the persisted OAuth session for that app, not to any shared process-level token.
   delete runtimeEnv.GH_TOKEN;
   delete runtimeEnv.GITHUB_TOKEN;
 }
