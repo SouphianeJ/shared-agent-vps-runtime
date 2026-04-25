@@ -1,6 +1,6 @@
 import { createWriteStream } from "node:fs";
 import { chmod, cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -23,6 +23,8 @@ const r2AuthPrefix = process.env.R2_CODEX_AUTH_PREFIX ?? "codex-auth";
 const keyRegistry = new Map();
 const nonceCache = new Map();
 const runQueueByKey = new Map();
+const activeRunsByKey = new Map();
+const activeCopilotAuthSessionsByApp = new Map();
 const appRegistryPromise = loadAppRegistry();
 
 registerKey(process.env.PROXY_KEY_ID_ACTIVE, process.env.PROXY_SIGNING_KEY_ACTIVE);
@@ -106,6 +108,104 @@ const server = createServer(async (request, response) => {
 
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true, fileId: payload.fileId }));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/runs/stop" && request.method === "POST") {
+      const rawBody = await readRequestBody(request);
+      const headers = normalizeHeaders(request.headers);
+      const validationError = validateSignedRequest({
+        method: request.method,
+        path: requestUrl.pathname,
+        headers,
+        rawBody,
+      });
+
+      if (validationError) {
+        response.writeHead(validationError.status, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(validationError.message);
+        return;
+      }
+
+      const payload = parseStopPayload(rawBody);
+      await resolveAppConfig(payload.appId);
+      await handleStopRequest(payload, response);
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/chats/cleanup" && request.method === "POST") {
+      const rawBody = await readRequestBody(request);
+      const headers = normalizeHeaders(request.headers);
+      const validationError = validateSignedRequest({
+        method: request.method,
+        path: requestUrl.pathname,
+        headers,
+        rawBody,
+      });
+
+      if (validationError) {
+        response.writeHead(validationError.status, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(validationError.message);
+        return;
+      }
+
+      const payload = parseCleanupPayload(rawBody);
+      const appConfig = await resolveAppConfig(payload.appId);
+      await handleCleanupRequest(payload, appConfig, response);
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/copilot-auth/start" && request.method === "POST") {
+      const rawBody = await readRequestBody(request);
+      const headers = normalizeHeaders(request.headers);
+      const validationError = validateSignedRequest({
+        method: request.method,
+        path: requestUrl.pathname,
+        headers,
+        rawBody,
+      });
+
+      if (validationError) {
+        response.writeHead(validationError.status, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(validationError.message);
+        return;
+      }
+
+      const payload = parseCopilotAuthPayload(rawBody);
+      const appConfig = await resolveAppConfig(payload.appId);
+      const session = await startCopilotAuthSession(appConfig);
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(serializeCopilotAuthSession(session)));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/copilot-auth/status" && request.method === "POST") {
+      const rawBody = await readRequestBody(request);
+      const headers = normalizeHeaders(request.headers);
+      const validationError = validateSignedRequest({
+        method: request.method,
+        path: requestUrl.pathname,
+        headers,
+        rawBody,
+      });
+
+      if (validationError) {
+        response.writeHead(validationError.status, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(validationError.message);
+        return;
+      }
+
+      const payload = parseCopilotAuthStatusPayload(rawBody);
+      const session = activeCopilotAuthSessionsByApp.get(payload.appId);
+
+      if (!session || session.id !== payload.authSessionId) {
+        response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "Copilot auth session not found." }));
+        return;
+      }
+
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(serializeCopilotAuthSession(session)));
       return;
     }
 
@@ -309,6 +409,10 @@ function buildWorkspacePath(appConfig, chatId) {
   return `${appConfig.workspaceRoot.replace(/\/+$/, "")}/${chatId}`;
 }
 
+function buildRunKey(appId, chatId) {
+  return `${appId}:${chatId}`;
+}
+
 function getFileDirectory(appConfig, chatId, fileId) {
   return join(appConfig.fileLibraryRoot, "chats", chatId, fileId);
 }
@@ -335,6 +439,15 @@ async function handleRunRequest(payload, appConfig, workspacePath, response) {
 
   await new Promise((resolve) => {
     const child = spawnAgent(payload, appConfig, workspacePath);
+    const runKey = buildRunKey(payload.appId, payload.chatId);
+    const runHandle = createActiveRunHandle({
+      key: runKey,
+      appId: payload.appId,
+      chatId: payload.chatId,
+      workspacePath,
+      child,
+      response,
+    });
     let stderrBuffer = "";
     let sawStdout = false;
     let finalized = false;
@@ -345,6 +458,8 @@ async function handleRunRequest(payload, appConfig, workspacePath, response) {
       }
 
       finalized = true;
+      unregisterActiveRun(runHandle);
+      stopWorkspaceSnapshotWatcher(runHandle);
       const errorMessage = processError?.message?.trim() || stderrBuffer.trim();
 
       try {
@@ -362,7 +477,12 @@ async function handleRunRequest(payload, appConfig, workspacePath, response) {
         return;
       }
 
-      if (code && !response.writableEnded) {
+      if (runHandle.stopRequested && !response.writableEnded) {
+        emitNdjson(response, {
+          type: "run_stopped",
+          message: runHandle.stopMessage || "Run stopped by user.",
+        });
+      } else if (code && !response.writableEnded) {
         response.write(
           `${JSON.stringify({
             type: "error",
@@ -390,6 +510,9 @@ async function handleRunRequest(payload, appConfig, workspacePath, response) {
       resolve();
     };
 
+    registerActiveRun(runHandle);
+    void emitWorkspaceSnapshot(runHandle, { force: false });
+
     child.stdout.on("data", (chunk) => {
       sawStdout = true;
       response.write(chunk);
@@ -414,6 +537,148 @@ async function handleRunRequest(payload, appConfig, workspacePath, response) {
       child.stdin.end();
     }
   });
+}
+
+function createActiveRunHandle({ key, appId, chatId, workspacePath, child, response }) {
+  let resolveDone;
+  const done = new Promise((resolve) => {
+    resolveDone = resolve;
+  });
+
+  return {
+    key,
+    appId,
+    chatId,
+    workspacePath,
+    child,
+    response,
+    stopRequested: false,
+    stopMessage: "",
+    workspaceEntries: [],
+    snapshotTimer: null,
+    done,
+    resolveDone,
+  };
+}
+
+function registerActiveRun(runHandle) {
+  activeRunsByKey.set(runHandle.key, runHandle);
+  runHandle.snapshotTimer = setInterval(() => {
+    void emitWorkspaceSnapshot(runHandle, { force: false });
+  }, 2_000);
+  runHandle.snapshotTimer.unref();
+}
+
+function unregisterActiveRun(runHandle) {
+  if (activeRunsByKey.get(runHandle.key) === runHandle) {
+    activeRunsByKey.delete(runHandle.key);
+  }
+
+  runHandle.resolveDone?.();
+}
+
+function stopWorkspaceSnapshotWatcher(runHandle) {
+  if (runHandle.snapshotTimer) {
+    clearInterval(runHandle.snapshotTimer);
+    runHandle.snapshotTimer = null;
+  }
+}
+
+function emitNdjson(response, payload) {
+  if (!response.writableEnded) {
+    response.write(`${JSON.stringify(payload)}\n`);
+  }
+}
+
+async function emitWorkspaceSnapshot(runHandle, { force }) {
+  const nextEntries = await collectWorkspaceEntries(runHandle.workspacePath);
+
+  if (!force && arraysEqual(nextEntries, runHandle.workspaceEntries)) {
+    return;
+  }
+
+  const previousEntries = new Set(runHandle.workspaceEntries);
+  const nextEntriesSet = new Set(nextEntries);
+  const added = nextEntries.filter((entry) => !previousEntries.has(entry));
+  const removed = runHandle.workspaceEntries.filter((entry) => !nextEntriesSet.has(entry));
+  runHandle.workspaceEntries = nextEntries;
+
+  if (!force && added.length === 0 && removed.length === 0) {
+    return;
+  }
+
+  emitNdjson(runHandle.response, {
+    type: "workspace_snapshot",
+    title: "Workspace activity",
+    summary: summarizeWorkspaceChange(added, removed, nextEntries),
+    added,
+    removed,
+  });
+}
+
+function summarizeWorkspaceChange(added, removed, entries) {
+  const parts = [];
+
+  if (added.length > 0) {
+    parts.push(`Added: ${added.slice(0, 8).join(", ")}`);
+  }
+
+  if (removed.length > 0) {
+    parts.push(`Removed: ${removed.slice(0, 8).join(", ")}`);
+  }
+
+  if (entries.length > 0) {
+    parts.push(`Visible now: ${entries.slice(0, 10).join(", ")}`);
+  } else {
+    parts.push("Workspace is currently empty.");
+  }
+
+  return parts.join(" | ");
+}
+
+async function collectWorkspaceEntries(workspacePath) {
+  const entries = [];
+  await collectWorkspaceEntriesRecursive(workspacePath, "", 0, 2, entries);
+  return entries.sort((left, right) => left.localeCompare(right));
+}
+
+async function collectWorkspaceEntriesRecursive(rootPath, relativePath, depth, maxDepth, output) {
+  let directoryEntries;
+
+  try {
+    directoryEntries = await readdir(relativePath ? join(rootPath, relativePath) : rootPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of directoryEntries) {
+    const normalizedRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+
+    if (entry.isDirectory()) {
+      output.push(`${normalizedRelativePath}/`);
+
+      if (depth >= maxDepth || shouldSkipWorkspaceSnapshotDirectory(entry.name)) {
+        continue;
+      }
+
+      await collectWorkspaceEntriesRecursive(rootPath, normalizedRelativePath, depth + 1, maxDepth, output);
+      continue;
+    }
+
+    output.push(normalizedRelativePath);
+  }
+}
+
+function shouldSkipWorkspaceSnapshotDirectory(name) {
+  return [".git", "node_modules", ".next"].includes(name);
+}
+
+function arraysEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((value, index) => value === right[index]);
 }
 
 async function ensureAppPaths(appConfig, workspacePath, payloadEnabledServers = null) {
@@ -640,6 +905,466 @@ function sanitizeDisplayName(inputName) {
   return collapsed || "file";
 }
 
+function parseStopPayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+  const chatId = typeof payload?.chatId === "string" ? payload.chatId.trim() : "";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(chatId)) {
+    throw new Error("Invalid chat id.");
+  }
+
+  return { appId, chatId };
+}
+
+function parseCleanupPayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+  const chatId = typeof payload?.chatId === "string" ? payload.chatId.trim() : "";
+  const workspacePath = typeof payload?.workspacePath === "string" && payload.workspacePath.trim() ? payload.workspacePath.trim() : null;
+  const codexSessionId = typeof payload?.codexSessionId === "string" && payload.codexSessionId.trim() ? payload.codexSessionId.trim() : null;
+  const copilotSessionId =
+    typeof payload?.copilotSessionId === "string" && payload.copilotSessionId.trim() ? payload.copilotSessionId.trim() : null;
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(chatId)) {
+    throw new Error("Invalid chat id.");
+  }
+
+  return {
+    appId,
+    chatId,
+    workspacePath,
+    codexSessionId,
+    copilotSessionId,
+  };
+}
+
+function parseCopilotAuthPayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  return { appId };
+}
+
+function parseCopilotAuthStatusPayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+  const authSessionId = typeof payload?.authSessionId === "string" ? payload.authSessionId.trim() : "";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  if (!/^[a-f0-9-]{36}$/i.test(authSessionId)) {
+    throw new Error("Invalid auth session id.");
+  }
+
+  return { appId, authSessionId };
+}
+
+async function startCopilotAuthSession(appConfig) {
+  const existingSession = activeCopilotAuthSessionsByApp.get(appConfig.id);
+
+  if (existingSession && !isCopilotAuthSessionFinal(existingSession)) {
+    return existingSession;
+  }
+
+  const session = createCopilotAuthSession(appConfig);
+  activeCopilotAuthSessionsByApp.set(appConfig.id, session);
+  await mkdir(appConfig.copilotHome, { recursive: true });
+
+  const env = {
+    ...process.env,
+    HOME: appConfig.appHome,
+    COPILOT_HOME: appConfig.copilotHome,
+  };
+
+  delete env.COPILOT_GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+
+  const child = spawn("script", ["-qefc", `copilot login --config-dir ${shellEscapeForPosix(appConfig.copilotHome)}`, "/dev/null"], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  session.child = child;
+
+  child.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    session.stdout += text;
+    consumeCopilotAuthText(session, text);
+  });
+
+  child.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    session.stderr += text;
+    consumeCopilotAuthText(session, text);
+  });
+
+  child.on("error", (error) => {
+    session.status = "failed";
+    session.error = error.message;
+    session.finishedAt = new Date().toISOString();
+    session.child = null;
+  });
+
+  child.on("close", (code) => {
+    session.finishedAt = new Date().toISOString();
+    session.child = null;
+
+    if (code === 0) {
+      session.status = "completed";
+      session.completed = true;
+      return;
+    }
+
+    if (session.status !== "failed") {
+      session.status = "failed";
+      session.error = buildCopilotAuthError(session) || `copilot login exited with status ${code ?? 1}.`;
+    }
+  });
+
+  await waitForCopilotDeviceCode(session, 2500);
+  return session;
+}
+
+function createCopilotAuthSession(appConfig) {
+  return {
+    id: randomUUID(),
+    appId: appConfig.id,
+    status: "starting",
+    deviceCode: null,
+    verificationUri: null,
+    completed: false,
+    error: null,
+    stdout: "",
+    stderr: "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    finishedAt: null,
+    child: null,
+  };
+}
+
+function consumeCopilotAuthText(session, text) {
+  session.updatedAt = new Date().toISOString();
+
+  const combined = `${session.stdout}\n${session.stderr}`;
+  const codeMatch = combined.match(/enter code ([A-Z0-9-]+)\.?/i);
+  const urlMatch = combined.match(/https:\/\/github\.com\/login\/device/i);
+  const clipboardFailure = /failed to copy to clipboard/i.test(text);
+
+  if (codeMatch) {
+    session.deviceCode = codeMatch[1];
+  }
+
+  if (urlMatch) {
+    session.verificationUri = urlMatch[0];
+  }
+
+  if (session.deviceCode && session.verificationUri && session.status === "starting") {
+    session.status = "pending_authorization";
+  }
+
+  if (/successfully authenticated|login successful|signed in/i.test(combined)) {
+    session.status = "completed";
+    session.completed = true;
+    session.finishedAt = new Date().toISOString();
+  }
+
+  if (clipboardFailure && session.deviceCode && session.verificationUri) {
+    session.status = "pending_authorization";
+    session.error = null;
+    return;
+  }
+
+  if (/no authentication information found|bad credentials|resource not accessible|denied|timed out/i.test(text) && !session.completed) {
+    session.status = "failed";
+    session.error = buildCopilotAuthError(session) || text.trim();
+    session.finishedAt = new Date().toISOString();
+  }
+}
+
+function buildCopilotAuthError(session) {
+  const combined = `${session.stderr}\n${session.stdout}`;
+  const lines = combined
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.find((line) => /error|failed|denied/i.test(line)) ?? null;
+}
+
+function isCopilotAuthSessionFinal(session) {
+  return session.status === "completed" || session.status === "failed";
+}
+
+function serializeCopilotAuthSession(session) {
+  return {
+    authSessionId: session.id,
+    appId: session.appId,
+    status: session.status,
+    deviceCode: session.deviceCode,
+    verificationUri: session.verificationUri,
+    completed: session.completed,
+    error: session.error,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    finishedAt: session.finishedAt,
+  };
+}
+
+function shellEscapeForPosix(value) {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
+async function waitForCopilotDeviceCode(session, timeoutMs) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    if (session.deviceCode || session.status === "failed" || session.status === "completed") {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function handleStopRequest(payload, response) {
+  const runHandle = activeRunsByKey.get(buildRunKey(payload.appId, payload.chatId));
+
+  if (!runHandle) {
+    response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ ok: true, stopped: false }));
+    return;
+  }
+
+  await stopRunHandle(runHandle, "Run stopped by user.");
+  response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify({ ok: true, stopped: true }));
+}
+
+async function stopRunHandle(runHandle, message) {
+  if (runHandle.stopRequested) {
+    await runHandle.done;
+    return;
+  }
+
+  runHandle.stopRequested = true;
+  runHandle.stopMessage = message;
+
+  try {
+    runHandle.child.kill("SIGTERM");
+  } catch {
+    // Ignore kill failures if the process already exited.
+  }
+
+  const forceKillTimer = setTimeout(() => {
+    if (activeRunsByKey.get(runHandle.key) === runHandle) {
+      try {
+        runHandle.child.kill("SIGKILL");
+      } catch {
+        // Ignore kill failures if the process already exited.
+      }
+    }
+  }, 5_000);
+  forceKillTimer.unref();
+
+  await runHandle.done;
+}
+
+async function handleCleanupRequest(payload, appConfig, response) {
+  const runHandle = activeRunsByKey.get(buildRunKey(payload.appId, payload.chatId));
+
+  if (runHandle) {
+    await stopRunHandle(runHandle, "Run stopped because the chat was deleted.");
+  }
+
+  const workspacePath = resolveWorkspaceCleanupPath(appConfig, payload.chatId, payload.workspacePath);
+  const deletedWorkspace = await removePathIfPresent(workspacePath);
+  const deletedFileLibrary = await removePathIfPresent(join(appConfig.fileLibraryRoot, "chats", payload.chatId));
+  const deletedCodexSessionFiles = await purgeCodexSessionArtifacts(appConfig, payload, workspacePath);
+  const { deletedDirectories: deletedCopilotSessionDirs, deletedLogFiles: deletedCopilotLogFiles } =
+    await purgeCopilotSessionArtifacts(appConfig, payload, workspacePath);
+
+  response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(
+    JSON.stringify({
+      ok: true,
+      deletedWorkspace,
+      deletedFileLibrary,
+      deletedCodexSessionFiles,
+      deletedCopilotSessionDirs,
+      deletedCopilotLogFiles,
+    }),
+  );
+}
+
+function resolveWorkspaceCleanupPath(appConfig, chatId, workspacePath) {
+  const fallbackWorkspacePath = buildWorkspacePath(appConfig, chatId);
+
+  if (!workspacePath) {
+    return fallbackWorkspacePath;
+  }
+
+  const resolvedWorkspaceRoot = resolve(appConfig.workspaceRoot);
+  const resolvedWorkspacePath = resolve(workspacePath);
+  const relativeWorkspacePath = relative(resolvedWorkspaceRoot, resolvedWorkspacePath);
+
+  if (isAbsolute(relativeWorkspacePath) || relativeWorkspacePath.startsWith("..")) {
+    throw new Error("Workspace cleanup path is outside the application workspace root.");
+  }
+
+  return resolvedWorkspacePath;
+}
+
+async function removePathIfPresent(targetPath) {
+  await rm(targetPath, { recursive: true, force: true });
+  return true;
+}
+
+async function purgeCodexSessionArtifacts(appConfig, payload, workspacePath) {
+  const sessionRoot = join(appConfig.codexHome, "sessions");
+  const markers = [payload.chatId, workspacePath, payload.codexSessionId].filter(Boolean);
+
+  if (markers.length === 0) {
+    return 0;
+  }
+
+  return removeFilesByPredicate(sessionRoot, async (filePath) => {
+    if (!filePath.endsWith(".jsonl")) {
+      return false;
+    }
+
+    if (payload.codexSessionId && filePath.includes(payload.codexSessionId)) {
+      return true;
+    }
+
+    const content = await safeReadUtf8(filePath);
+    return markers.some((marker) => content.includes(marker));
+  });
+}
+
+async function purgeCopilotSessionArtifacts(appConfig, payload, workspacePath) {
+  const sessionStateRoot = join(appConfig.copilotHome, "session-state");
+  const directoriesToDelete = new Set();
+  const markers = [payload.chatId, workspacePath].filter(Boolean);
+
+  if (payload.copilotSessionId) {
+    directoriesToDelete.add(join(sessionStateRoot, payload.copilotSessionId));
+  }
+
+  for (const directoryPath of await findCopilotSessionDirectories(sessionStateRoot)) {
+    const workspaceFilePath = join(directoryPath, "workspace.yaml");
+    const content = await safeReadUtf8(workspaceFilePath);
+
+    if (markers.some((marker) => content.includes(marker))) {
+      directoriesToDelete.add(directoryPath);
+    }
+  }
+
+  let deletedDirectories = 0;
+
+  for (const directoryPath of directoriesToDelete) {
+    await rm(directoryPath, { recursive: true, force: true });
+    deletedDirectories += 1;
+  }
+
+  const deletedLogFiles = await removeFilesByPredicate(join(appConfig.copilotHome, "logs"), async (filePath) => {
+    const content = await safeReadUtf8(filePath);
+    return [payload.chatId, workspacePath, payload.copilotSessionId].filter(Boolean).some((marker) => content.includes(marker));
+  });
+
+  return { deletedDirectories, deletedLogFiles };
+}
+
+async function findCopilotSessionDirectories(sessionStateRoot) {
+  let entries = [];
+
+  try {
+    entries = await readdir(sessionStateRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => join(sessionStateRoot, entry.name));
+}
+
+async function removeFilesByPredicate(rootPath, predicate) {
+  let entries = [];
+
+  try {
+    entries = await readdir(rootPath, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+
+  let deletedCount = 0;
+
+  for (const entry of entries) {
+    const targetPath = join(rootPath, entry.name);
+
+    if (entry.isDirectory()) {
+      deletedCount += await removeFilesByPredicate(targetPath, predicate);
+      continue;
+    }
+
+    if (await predicate(targetPath)) {
+      await rm(targetPath, { force: true });
+      deletedCount += 1;
+    }
+  }
+
+  return deletedCount;
+}
+
+async function safeReadUtf8(filePath) {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+
 function spawnAgent(payload, appConfig, workspacePath) {
   const runtimeEnv = {
     ...process.env,
@@ -649,6 +1374,7 @@ function spawnAgent(payload, appConfig, workspacePath) {
   };
 
   if (payload.engine === "copilot") {
+    applyCopilotAuthEnv(runtimeEnv, appConfig);
     const execArgs = [
       "--output-format=json",
       "--allow-all",
@@ -691,6 +1417,31 @@ function spawnAgent(payload, appConfig, workspacePath) {
     env: runtimeEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
+}
+
+function applyCopilotAuthEnv(runtimeEnv, appConfig) {
+  const appScopedToken = process.env[buildAppScopedCopilotTokenEnvName(appConfig.id)]?.trim() ?? "";
+  const genericCopilotToken = process.env.COPILOT_GITHUB_TOKEN?.trim() ?? "";
+  const selectedToken = appScopedToken || genericCopilotToken;
+
+  if (selectedToken) {
+    runtimeEnv.COPILOT_GITHUB_TOKEN = selectedToken;
+  } else {
+    delete runtimeEnv.COPILOT_GITHUB_TOKEN;
+  }
+
+  // Copilot CLI checks COPILOT_GITHUB_TOKEN first, then GH_TOKEN, then GITHUB_TOKEN.
+  // Removing lower-priority tokens avoids accidental fallback to an unsupported or stale token.
+  delete runtimeEnv.GH_TOKEN;
+  delete runtimeEnv.GITHUB_TOKEN;
+}
+
+function buildAppScopedCopilotTokenEnvName(appId) {
+  const normalized = String(appId)
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+  return `${normalized}_COPILOT_GITHUB_TOKEN`;
 }
 
 function shouldSerializeCodexRuns(payload) {

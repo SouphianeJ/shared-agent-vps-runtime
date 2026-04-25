@@ -9,6 +9,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 - l'upload direct de fichiers expose sur `/codex/files/*`
 - la recolte des fichiers generes depuis `__generated_files__/` en fin de run
 - l'emission d'evenements NDJSON `generated_file` avec metadonnees persistables (`fileId`, `originalName`, `contentType`, `size`, `sha256`)
+- l'injection d'un token Copilot dedie par application pour les runs non interactifs
 - la configuration multi-app du runtime
 - les scripts de bootstrap/deploiement VPS
 - le workflow GitHub Actions de deploiement
@@ -57,6 +58,23 @@ Voir [.env.example](./.env.example).
 Pour `moodle-actions`, utiliser l'app id `moodle-actions` et, si besoin, surcharger les URLs MCP Copilot avec le prefix `MOODLE_ACTIONS_`.
 Pour limiter le nombre de tools exposes a Copilot, utiliser `MOODLE_ACTIONS_COPILOT_ENABLED_SERVERS=Moodle`.
 Pour limiter la taille des uploads fichiers, utiliser `CHAT_UPLOAD_MAX_BYTES`.
+
+## Auth Copilot CLI
+
+Pour les runs `copilot` non interactifs, utiliser un fine-grained PAT GitHub avec la permission `Copilot Requests`.
+
+Variables supportees:
+
+- `COPILOT_GITHUB_TOKEN`
+  - fallback global
+- `VPS_PERSONAL_CODEX_COPILOT_GITHUB_TOKEN`
+  - prioritaire pour l'app `vps-personal-codex`
+- `WEEKLY_IDEATOR_COPILOT_GITHUB_TOKEN`
+  - prioritaire pour l'app `weekly-ideator-control-plane`
+- `MOODLE_ACTIONS_COPILOT_GITHUB_TOKEN`
+  - prioritaire pour l'app `moodle-actions`
+
+Le runtime supprime volontairement `GH_TOKEN` et `GITHUB_TOKEN` de l'environnement du process `copilot` pour eviter qu'un token stale ou non supporte prenne le dessus par erreur.
 
 ## Auth Codex via R2
 
