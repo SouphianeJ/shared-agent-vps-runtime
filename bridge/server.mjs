@@ -274,6 +274,7 @@ async function rmFileDirectory(appConfig, chatId, fileId) {
 async function handleRunRequest(payload, appConfig, workspacePath, response) {
   await ensureAppPaths(appConfig, workspacePath, {
     payloadEnabledServers: payload.enabledMcpServers,
+    includeBrowserMcp: payload.includeBrowserMcp,
     runtimeRoot,
   });
 
@@ -285,7 +286,10 @@ async function handleRunRequest(payload, appConfig, workspacePath, response) {
   await resetGeneratedFilesDirectory(workspacePath);
 
   if (payload.engine === "copilot") {
-    await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, payload.enabledMcpServers);
+    await ensureCopilotWorkspaceSettings(appConfig, workspacePath, payload.reasoningEffort, {
+      payloadEnabledServers: payload.enabledMcpServers,
+      includeBrowserMcp: payload.includeBrowserMcp,
+    });
   }
 
   response.writeHead(200, {

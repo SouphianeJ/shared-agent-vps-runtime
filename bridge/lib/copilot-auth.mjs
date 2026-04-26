@@ -212,8 +212,11 @@ export async function hasGhAuthSession(appConfig) {
 
 export function applyCopilotAuthEnv(runtimeEnv, appConfig) {
   const appScopedToken = process.env[buildAppScopedCopilotTokenEnvName(appConfig.id)]?.trim() ?? "";
-  if (appScopedToken) {
-    runtimeEnv.COPILOT_GITHUB_TOKEN = appScopedToken;
+  const fallbackToken = process.env.COPILOT_GITHUB_TOKEN?.trim() ?? "";
+  const token = appScopedToken || fallbackToken;
+
+  if (token) {
+    runtimeEnv.COPILOT_GITHUB_TOKEN = token;
   } else {
     delete runtimeEnv.COPILOT_GITHUB_TOKEN;
   }

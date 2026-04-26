@@ -23,6 +23,7 @@ export function parsePayload(rawBody, { defaultModel = "", allowDangerousDefault
       : null;
   const allowBypassSandbox =
     typeof payload.allowBypassSandbox === "boolean" ? payload.allowBypassSandbox : allowDangerousDefault;
+  const includeBrowserMcp = typeof payload.includeBrowserMcp === "boolean" ? payload.includeBrowserMcp : true;
   const enabledMcpServers = Array.isArray(payload.enabledMcpServers)
     ? payload.enabledMcpServers.map((value) => String(value ?? "").trim()).filter(Boolean)
     : null;
@@ -51,6 +52,7 @@ export function parsePayload(rawBody, { defaultModel = "", allowDangerousDefault
     model,
     reasoningEffort,
     allowBypassSandbox,
+    includeBrowserMcp,
     enabledMcpServers,
     attachmentIds,
   };
