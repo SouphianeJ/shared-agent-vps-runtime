@@ -231,8 +231,6 @@ function buildObjectKey(repoFullName, fileName) {
 
   return [
     r2PortfolioPublicPrefix,
-    sanitizeSegment(appId),
-    sanitizeSegment(chatId),
     repoScope,
     `${timestamp}-${uniqueSuffix}-${sanitizeFileName(fileName)}`,
   ].join("/");
@@ -382,6 +380,8 @@ async function attachRepoProof({
   repoFullName,
   publicUrl,
   artifactKind,
+  objectKey,
+  sourceFileName,
   proofName,
   description,
 }) {
@@ -406,10 +406,12 @@ async function attachRepoProof({
     .project({
       _id: 1,
       proofName: 1,
+      kind: 1,
       link: 1,
       type: 1,
       description: 1,
       repo: 1,
+      mediaArtifacts: 1,
     })
     .toArray();
 
@@ -422,9 +424,37 @@ async function attachRepoProof({
   }
 
   const [existing] = matches;
+  const nextMediaArtifact = {
+    kind: artifactKind,
+    url: publicUrl.trim(),
+    objectKey: typeof objectKey === "string" && objectKey.trim() ? objectKey.trim() : null,
+    sourceFileName: typeof sourceFileName === "string" && sourceFileName.trim() ? sourceFileName.trim() : null,
+    createdAt: new Date().toISOString(),
+  };
+  const existingMediaArtifacts = Array.isArray(existing.mediaArtifacts)
+    ? existing.mediaArtifacts.filter(
+        (entry) =>
+          entry &&
+          typeof entry === "object" &&
+          typeof entry.url === "string" &&
+          entry.url.trim(),
+      )
+    : [];
+  const dedupedMediaArtifacts = existingMediaArtifacts.filter((entry) => {
+    if (nextMediaArtifact.objectKey && typeof entry.objectKey === "string" && entry.objectKey === nextMediaArtifact.objectKey) {
+      return false;
+    }
+
+    return entry.url !== nextMediaArtifact.url;
+  });
+  const mediaArtifacts = [...dedupedMediaArtifacts, nextMediaArtifact];
   const update = {
-    link: publicUrl.trim(),
-    type: artifactKind,
+    link:
+      existing.kind === "repo_card"
+        ? existing.repo?.repoUrl?.trim() || existing.link?.trim() || publicUrl.trim()
+        : publicUrl.trim(),
+    type: existing.kind === "repo_card" ? existing.type ?? "Site URL" : artifactKind,
+    mediaArtifacts,
     ...(typeof proofName === "string" && proofName.trim() ? { proofName: proofName.trim() } : {}),
     ...(typeof description === "string" && description.trim() ? { description: description.trim() } : {}),
   };
@@ -444,6 +474,7 @@ async function attachRepoProof({
       type: existing.type ?? null,
       description: existing.description ?? null,
       proofName: existing.proofName ?? null,
+      mediaArtifacts: existing.mediaArtifacts ?? [],
     },
     next: update,
   };
@@ -485,6 +516,8 @@ const tools = [
         repoFullName: { type: "string" },
         publicUrl: { type: "string" },
         artifactKind: { type: "string", enum: ["image", "video"] },
+        objectKey: { type: "string" },
+        sourceFileName: { type: "string" },
         proofName: { type: "string" },
         description: { type: "string" },
       },
@@ -588,6 +621,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         repoFullName: String(args.repoFullName || "").trim(),
         publicUrl: String(args.publicUrl || "").trim(),
         artifactKind: args.artifactKind,
+        objectKey: typeof args.objectKey === "string" ? args.objectKey : undefined,
+        sourceFileName: typeof args.sourceFileName === "string" ? args.sourceFileName : undefined,
         proofName: typeof args.proofName === "string" ? args.proofName : undefined,
         description: typeof args.description === "string" ? args.description : undefined,
       });
@@ -618,6 +653,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         repoFullName,
         publicUrl: upload.publicUrl,
         artifactKind,
+        objectKey: upload.objectKey,
+        sourceFileName: source.fileName,
         proofName: typeof args.proofName === "string" ? args.proofName : undefined,
         description: typeof args.description === "string" ? args.description : undefined,
       });
