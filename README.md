@@ -9,6 +9,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 - l'upload direct de fichiers expose sur `/codex/files/*`
 - la recolte des fichiers generes depuis `__generated_files__/` en fin de run
 - l'emission d'evenements NDJSON `generated_file` avec metadonnees persistables (`fileId`, `originalName`, `contentType`, `size`, `sha256`)
+- un MCP local `Persist` pour publier des artefacts navigateur vers R2 et rattacher un `repo_card` existant dans `seedPortfolio`
 - l'injection d'un token Copilot dedie par application pour les runs non interactifs
 - la configuration multi-app du runtime
 - les scripts de bootstrap/deploiement VPS
@@ -86,6 +87,16 @@ Variables requises dans `.env`:
 - `R2_ENDPOINT`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
+- `R2_PUBLIC_BASE_URL`
+  - base URL publique servant a construire `publicUrl`, par exemple un domaine R2 public ou custom domain
+- `R2_PORTFOLIO_PUBLIC_PREFIX`
+  - prefix dedie aux artefacts portfolio/browser, par exemple `proof-artifacts`
+- `R2_BROWSER_STATE_PREFIX`
+  - prefix prive dedie aux `storageState` Playwright, par exemple `browser-storage-state`
+- `SEEDPORTFOLIO_MONGODB_URI`
+- `SEEDPORTFOLIO_MONGODB_DB`
+- `SEEDPORTFOLIO_PROOFS_COLLECTION`
+  - optionnel, `proofs` par defaut
 
 Configuration optionnelle:
 
@@ -106,6 +117,32 @@ Scripts:
 - `bash scripts/upload-auth-to-r2.sh <app_id>`
 
 Le bootstrap appelle automatiquement le restore R2 pour chaque app declaree dans `config/apps.json` lorsque la configuration R2 est presente.
+
+## Persist MCP
+
+Le runtime injecte un MCP local `Persist` dans Codex et Copilot.
+
+Tools exposes:
+
+- `persist_list_generated_files`
+- `persist_r2_upload_generated_file`
+- `persist_portfolio_attach_repo_proof`
+- `persist_r2_upload_and_attach_repo_proof`
+- `persist_browser_storage_state_upload`
+- `persist_browser_storage_state_download`
+
+Contraintes V1:
+
+- seules les sorties presentes dans `__generated_files__/` sont uploadables
+- les uploads R2 utilisent un prefix dedie et des cles uniques pour ne jamais ecraser un objet existant
+- la mise a jour portfolio ne cible qu'une preuve `kind=repo_card` dont `repo.repoFullName` correspond exactement
+- si aucune preuve ne correspond, le tool echoue explicitement
+
+Extension V1.1:
+
+- les `storageState` Playwright sont stockes localement sous `__browser__/storage-state/`
+- `persist_browser_storage_state_upload` publie un `latest.json` prive par couple `appId/siteScope/accountAlias`
+- `persist_browser_storage_state_download` restaure ce `latest.json` dans le workspace courant avant `browser_storage_state_load`
 
 ## Deploiement
 

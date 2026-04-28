@@ -1,7 +1,8 @@
-import { mkdir, copyFile } from "node:fs/promises";
+import { mkdir, copyFile, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -10,7 +11,13 @@ import { chromium } from "playwright";
 const workspacePath = process.env.BROWSER_WORKSPACE_PATH?.trim() || process.cwd();
 const sessionDir = process.env.BROWSER_SESSION_DIR?.trim() || join(workspacePath, "__browser__");
 const generatedDir = process.env.BROWSER_GENERATED_DIR?.trim() || join(workspacePath, "__generated_files__");
+const storageStateDir = process.env.BROWSER_STORAGE_STATE_DIR?.trim() || join(sessionDir, "storage-state");
 const headless = !/^(0|false|no)$/i.test(process.env.BROWSER_HEADLESS?.trim() || "true");
+const r2Bucket = process.env.R2_BUCKET?.trim() || "";
+const r2Endpoint = process.env.R2_ENDPOINT?.trim() || "";
+const r2AccessKeyId = process.env.R2_ACCESS_KEY_ID?.trim() || process.env.AWS_ACCESS_KEY_ID?.trim() || "";
+const r2SecretAccessKey = process.env.R2_SECRET_ACCESS_KEY?.trim() || process.env.AWS_SECRET_ACCESS_KEY?.trim() || "";
+const r2BrowserStatePrefix = process.env.R2_BROWSER_STATE_PREFIX?.trim().replace(/^\/+|\/+$/g, "") || "browser-storage-state";
 
 class BrowserSession {
   constructor() {
@@ -20,11 +27,15 @@ class BrowserSession {
     this.lastUrl = null;
     this.pendingVideo = null;
     this.recordingActive = false;
+    this.storageStatePath = null;
+    this.storageStateScope = null;
+    this.storageStateRestored = null;
   }
 
   async ensureDirectories() {
     await mkdir(sessionDir, { recursive: true });
     await mkdir(generatedDir, { recursive: true });
+    await mkdir(storageStateDir, { recursive: true });
   }
 
   async ensureBrowser() {
@@ -57,6 +68,10 @@ class BrowserSession {
       this.recordingActive = true;
     } else {
       this.recordingActive = false;
+    }
+
+    if (this.storageStatePath && existsSync(this.storageStatePath)) {
+      contextOptions.storageState = this.storageStatePath;
     }
 
     this.context = await this.browser.newContext(contextOptions);
@@ -100,6 +115,7 @@ class BrowserSession {
 }
 
 const session = new BrowserSession();
+let s3Client;
 
 function textResult(payload) {
   return {
@@ -120,6 +136,238 @@ function requireObject(value) {
 function resolveTimestampedFile(prefix, extension) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return join(generatedDir, `${prefix}-${stamp}.${extension}`);
+}
+
+function sanitizeSegment(input) {
+  return String(input || "unknown")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "") || "unknown";
+}
+
+function sanitizeStateFileName(input) {
+  const normalized = String(input || "browser-storage-state.json")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (!normalized) {
+    return "browser-storage-state.json";
+  }
+
+  return normalized.toLowerCase().endsWith(".json") ? normalized : `${normalized}.json`;
+}
+
+function resolveStorageStatePath(fileName) {
+  return join(storageStateDir, sanitizeStateFileName(fileName));
+}
+
+function hasR2Config() {
+  return Boolean(r2Bucket && r2Endpoint && r2AccessKeyId && r2SecretAccessKey);
+}
+
+function getS3Client() {
+  if (!hasR2Config()) {
+    return null;
+  }
+
+  if (!s3Client) {
+    s3Client = new S3Client({
+      region: "auto",
+      endpoint: r2Endpoint,
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: r2AccessKeyId,
+        secretAccessKey: r2SecretAccessKey,
+      },
+    });
+  }
+
+  return s3Client;
+}
+
+function buildBrowserStateObjectKey(siteScope, accountAlias = "default") {
+  return [
+    r2BrowserStatePrefix,
+    sanitizeSegment(process.env.AGENT_RUNTIME_APP_ID?.trim() || process.env.PERSIST_APP_ID?.trim() || "unknown-app"),
+    sanitizeSegment(siteScope),
+    sanitizeSegment(accountAlias),
+    "latest.json",
+  ].join("/");
+}
+
+function inferSiteScope(url, args) {
+  const explicitScope = typeof args.siteScope === "string" ? args.siteScope.trim() : "";
+
+  if (explicitScope) {
+    return explicitScope;
+  }
+
+  try {
+    return new URL(url).hostname || "";
+  } catch {
+    return "";
+  }
+}
+
+async function maybeRestoreStorageState(url, args) {
+  if (args.restoreStorageState === false || session.context) {
+    return null;
+  }
+
+  const siteScope = inferSiteScope(url, args);
+  if (!siteScope) {
+    return null;
+  }
+
+  const accountAlias = typeof args.accountAlias === "string" && args.accountAlias.trim() ? args.accountAlias.trim() : "default";
+  return await restoreStorageStateForScope({
+    siteScope,
+    accountAlias,
+    allowAliasFallback: !("accountAlias" in args),
+  });
+}
+
+async function restoreStorageStateForScope({ siteScope, accountAlias = "default", allowAliasFallback = true }) {
+  const desiredScopeKey = `${siteScope}::${accountAlias}`;
+
+  if (session.storageStatePath && session.storageStateScope === desiredScopeKey && existsSync(session.storageStatePath)) {
+    session.storageStateRestored = {
+      source: "local",
+      siteScope,
+      accountAlias,
+      fileName: basename(session.storageStatePath),
+      objectKey: null,
+    };
+    return session.storageStateRestored;
+  }
+
+  const localCandidates = [
+    resolveStorageStatePath(`${sanitizeSegment(siteScope)}-${sanitizeSegment(accountAlias)}.json`),
+    resolveStorageStatePath(`${sanitizeSegment(siteScope)}.json`),
+  ];
+
+  for (const candidate of localCandidates) {
+    if (existsSync(candidate)) {
+      session.storageStatePath = candidate;
+      session.storageStateScope = desiredScopeKey;
+      session.storageStateRestored = {
+        source: "local",
+        siteScope,
+        accountAlias,
+        fileName: basename(candidate),
+        objectKey: null,
+      };
+      return session.storageStateRestored;
+    }
+  }
+
+  const client = getS3Client();
+  if (!client) {
+    return null;
+  }
+
+  const exactResult = await downloadStorageStateObject(client, siteScope, accountAlias, desiredScopeKey);
+  if (exactResult) {
+    return exactResult;
+  }
+
+  if (allowAliasFallback) {
+    const latestResult = await downloadLatestStorageStateObject(client, siteScope);
+    if (latestResult) {
+      return latestResult;
+    }
+  }
+
+  session.storageStatePath = null;
+  session.storageStateScope = null;
+  session.storageStateRestored = {
+    source: "missing",
+    siteScope,
+    accountAlias,
+    fileName: null,
+    objectKey: buildBrowserStateObjectKey(siteScope, accountAlias),
+  };
+  return session.storageStateRestored;
+}
+
+async function downloadStorageStateObject(client, siteScope, accountAlias, desiredScopeKey) {
+  const objectKey = buildBrowserStateObjectKey(siteScope, accountAlias);
+
+  try {
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: r2Bucket,
+        Key: objectKey,
+      }),
+    );
+
+    if (!response.Body || typeof response.Body.transformToByteArray !== "function") {
+      return null;
+    }
+
+    const bytes = await response.Body.transformToByteArray();
+    const targetPath = resolveStorageStatePath(`${sanitizeSegment(siteScope)}-${sanitizeSegment(accountAlias)}.json`);
+    await mkdir(storageStateDir, { recursive: true });
+    await writeFile(targetPath, Buffer.from(bytes));
+    session.storageStatePath = targetPath;
+    session.storageStateScope = desiredScopeKey;
+    session.storageStateRestored = {
+      source: "r2",
+      siteScope,
+      accountAlias,
+      fileName: basename(targetPath),
+      objectKey,
+    };
+    return session.storageStateRestored;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const errorName = error && typeof error === "object" && "name" in error ? String(error.name) : "";
+    const statusCode =
+      error && typeof error === "object" && "$metadata" in error && error.$metadata && typeof error.$metadata === "object"
+        ? Number(error.$metadata.httpStatusCode ?? 0)
+        : 0;
+
+    if (/NoSuchKey|NotFound|404/i.test(message) || /NoSuchKey|NotFound/i.test(errorName) || statusCode === 404) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function downloadLatestStorageStateObject(client, siteScope) {
+  const prefix = [
+    r2BrowserStatePrefix,
+    sanitizeSegment(process.env.AGENT_RUNTIME_APP_ID?.trim() || process.env.PERSIST_APP_ID?.trim() || "unknown-app"),
+    sanitizeSegment(siteScope),
+    "",
+  ].join("/");
+
+  const listing = await client.send(
+    new ListObjectsV2Command({
+      Bucket: r2Bucket,
+      Prefix: prefix,
+    }),
+  );
+
+  const candidates = (listing.Contents || [])
+    .filter((entry) => typeof entry.Key === "string" && entry.Key.endsWith("/latest.json"))
+    .sort((left, right) => {
+      const leftTime = left.LastModified ? new Date(left.LastModified).getTime() : 0;
+      const rightTime = right.LastModified ? new Date(right.LastModified).getTime() : 0;
+      return rightTime - leftTime;
+    });
+
+  const latest = candidates[0];
+  if (!latest?.Key) {
+    return null;
+  }
+
+  const alias = latest.Key.split("/").at(-2) || "default";
+  return await downloadStorageStateObject(client, siteScope, alias, `${siteScope}::${alias}`);
 }
 
 async function resolveLocator(page, args) {
@@ -157,6 +405,7 @@ async function buildOpenResult(page, response, label = "opened") {
     title,
     status: response?.status?.() ?? null,
     contentPreview: content,
+    storageStateRestored: session.storageStateRestored,
   };
 }
 
@@ -248,6 +497,9 @@ const tools = [
         waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"] },
         timeoutMs: { type: "number" },
         recordVideo: { type: "boolean" },
+        siteScope: { type: "string" },
+        accountAlias: { type: "string" },
+        restoreStorageState: { type: "boolean" },
       },
       required: ["url"],
     },
@@ -390,6 +642,48 @@ const tools = [
       properties: {},
     },
   },
+  {
+    name: "browser_storage_state_save",
+    description: "Save the current Playwright storageState JSON for reuse in later browser contexts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileName: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "browser_storage_state_load",
+    description: "Load a saved storageState JSON and recreate future browser contexts with it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileName: { type: "string" },
+      },
+      required: ["fileName"],
+    },
+  },
+  {
+    name: "browser_storage_state_clear",
+    description: "Clear the configured storageState so future browser contexts start fresh.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "browser_restore_storage_state",
+    description: "Restore a previously persisted Playwright storage state for a site scope into Browser MCP and prepare future pages to use it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        siteScope: { type: "string" },
+        accountAlias: { type: "string" },
+        allowAliasFallback: { type: "boolean" },
+      },
+      required: ["siteScope"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -426,6 +720,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
         };
       }
+
+      await maybeRestoreStorageState(url, args);
 
       const page = await session.ensureBrowser();
       const response = await page.goto(url, {
@@ -644,6 +940,94 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return textResult({
         ok: true,
         action: "closed",
+      });
+    }
+
+    case "browser_storage_state_save": {
+      await session.ensureDirectories();
+
+      if (!session.context) {
+        await session.ensureBrowser();
+      }
+
+      const targetPath = resolveStorageStatePath(args.fileName);
+      await session.context.storageState({ path: targetPath });
+      session.storageStatePath = targetPath;
+      session.storageStateRestored = {
+        source: "local",
+        siteScope: null,
+        accountAlias: null,
+        fileName: basename(targetPath),
+        objectKey: null,
+      };
+      const fileInfo = await stat(targetPath);
+
+      return textResult({
+        ok: true,
+        action: "storage_state_saved",
+        path: targetPath,
+        fileName: basename(targetPath),
+        size: Number(fileInfo.size ?? 0),
+      });
+    }
+
+    case "browser_storage_state_load": {
+      await session.ensureDirectories();
+      const targetPath = resolveStorageStatePath(args.fileName);
+
+      if (!existsSync(targetPath)) {
+        throw new Error(`Storage state file not found: ${basename(targetPath)}`);
+      }
+
+      session.storageStatePath = targetPath;
+      session.storageStateScope = null;
+      session.storageStateRestored = {
+        source: "local",
+        siteScope: null,
+        accountAlias: null,
+        fileName: basename(targetPath),
+        objectKey: null,
+      };
+      await session.closeContext();
+
+      return textResult({
+        ok: true,
+        action: "storage_state_loaded",
+        path: targetPath,
+        fileName: basename(targetPath),
+      });
+    }
+
+    case "browser_storage_state_clear": {
+      session.storageStatePath = null;
+      session.storageStateScope = null;
+      session.storageStateRestored = null;
+      await session.closeContext();
+
+      return textResult({
+        ok: true,
+        action: "storage_state_cleared",
+      });
+    }
+
+    case "browser_restore_storage_state": {
+      const siteScope = String(args.siteScope || "").trim();
+      if (!siteScope) {
+        throw new Error("Missing siteScope.");
+      }
+
+      await session.ensureDirectories();
+      const restored = await restoreStorageStateForScope({
+        siteScope,
+        accountAlias: typeof args.accountAlias === "string" && args.accountAlias.trim() ? args.accountAlias.trim() : "default",
+        allowAliasFallback: args.allowAliasFallback !== false,
+      });
+      await session.closeContext();
+
+      return textResult({
+        ok: Boolean(restored && restored.source !== "missing"),
+        action: "storage_state_restored",
+        restored,
       });
     }
 
