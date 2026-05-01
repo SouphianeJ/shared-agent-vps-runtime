@@ -430,6 +430,7 @@ function spawnAgent(payload, appConfig, workspacePath) {
       cwd: workspacePath,
       env: runtimeEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
   }
 
@@ -453,6 +454,7 @@ function spawnAgent(payload, appConfig, workspacePath) {
   return spawn("codex", ["-C", workspacePath, ...execArgs], {
     env: runtimeEnv,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
   });
 }
 
@@ -480,7 +482,11 @@ async function stopRunHandle(runHandle, message) {
   runHandle.stopMessage = message;
 
   try {
-    runHandle.child.kill("SIGTERM");
+    if (typeof runHandle.child.pid === "number" && runHandle.child.pid > 0) {
+      process.kill(-runHandle.child.pid, "SIGTERM");
+    } else {
+      runHandle.child.kill("SIGTERM");
+    }
   } catch {
     // Ignore kill failures if the process already exited.
   }
@@ -488,7 +494,11 @@ async function stopRunHandle(runHandle, message) {
   const forceKillTimer = setTimeout(() => {
     if (activeRunsByKey.get(runHandle.key) === runHandle) {
       try {
-        runHandle.child.kill("SIGKILL");
+        if (typeof runHandle.child.pid === "number" && runHandle.child.pid > 0) {
+          process.kill(-runHandle.child.pid, "SIGKILL");
+        } else {
+          runHandle.child.kill("SIGKILL");
+        }
       } catch {
         // Ignore kill failures if the process already exited.
       }
