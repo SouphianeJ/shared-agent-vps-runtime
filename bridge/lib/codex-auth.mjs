@@ -98,16 +98,16 @@ function createCodexAuthSession(appConfig) {
 function consumeCodexAuthText(session, text) {
   session.updatedAt = new Date().toISOString();
 
-  const combined = `${session.stdout}\n${session.stderr}`;
-  const urlMatch = combined.match(/https?:\/\/[^\s)]+/i);
-  const codeMatch = combined.match(/(?:user code|device code|one-time code|code)[:\s]+([A-Z0-9-]{4,})/i);
+  const combined = normalizeCodexAuthText(`${session.stdout}\n${session.stderr}`);
+  const verificationUri = extractVerificationUri(combined);
+  const deviceCode = extractDeviceCode(combined, verificationUri);
 
-  if (urlMatch) {
-    session.verificationUri = urlMatch[0];
+  if (verificationUri) {
+    session.verificationUri = verificationUri;
   }
 
-  if (codeMatch) {
-    session.deviceCode = codeMatch[1];
+  if (deviceCode) {
+    session.deviceCode = deviceCode;
   }
 
   if (session.deviceCode && session.verificationUri && session.status === "starting") {
@@ -121,20 +121,22 @@ function consumeCodexAuthText(session, text) {
     session.finishedAt = new Date().toISOString();
   }
 
-  if (/error|failed|timed out|denied|expired/i.test(text) && !session.completed) {
+  const authError = extractCodexAuthFailure(text, combined);
+
+  if (authError && !session.completed) {
     session.status = "failed";
-    session.error = buildCodexAuthError(session) || text.trim();
+    session.error = authError;
     session.finishedAt = new Date().toISOString();
   }
 }
 
 function buildCodexAuthError(session) {
-  const combined = `${session.stderr}\n${session.stdout}`;
+  const combined = normalizeCodexAuthText(`${session.stderr}\n${session.stdout}`);
   const lines = combined
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  return lines.find((line) => /error|failed|denied|expired/i.test(line)) ?? null;
+  return lines.find((line) => /error|failed|denied|timed out|timeout|could not|unable to/i.test(line)) ?? null;
 }
 
 function isCodexAuthSessionFinal(session) {
@@ -191,4 +193,70 @@ export async function refreshCodexAuthSessionStatus(session, appConfig, r2Option
   }
 
   return session;
+}
+
+function normalizeCodexAuthText(value) {
+  return value
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\r/g, "\n")
+    .replace(/[^\S\n]+/g, " ");
+}
+
+function extractVerificationUri(value) {
+  const urlMatch = value.match(/https?:\/\/[^\s<>"')\]}]+/i);
+
+  if (!urlMatch) {
+    return null;
+  }
+
+  return urlMatch[0].replace(/[),.;:]+$/, "");
+}
+
+function extractDeviceCode(value, verificationUri) {
+  const patterns = [
+    /(?:user|device|one-time)[ -]?code(?: is)?[:\s]+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})*)/i,
+    /enter (?:the )?code[:\s]+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})*)/i,
+    /code[:\s]+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})*)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  if (!verificationUri) {
+    return null;
+  }
+
+  try {
+    const url = new URL(verificationUri);
+    const fromQuery = url.searchParams.get("user_code") ?? url.searchParams.get("code");
+    return fromQuery?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractCodexAuthFailure(text, combined) {
+  const normalizedChunk = normalizeCodexAuthText(text);
+  const lines = normalizedChunk
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const failureLine =
+    lines.find((line) => /error|failed|denied|timed out|timeout|could not|unable to/i.test(line) && !/expires? in/i.test(line)) ?? null;
+
+  if (failureLine) {
+    return failureLine;
+  }
+
+  if (/authorization pending|waiting for authorization|expires? in/i.test(combined)) {
+    return null;
+  }
+
+  return null;
 }
