@@ -182,3 +182,44 @@ export function parseCopilotAuthStatusPayload(rawBody) {
 
   return { appId, authSessionId };
 }
+
+export function parseCodexAuthPayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  return { appId };
+}
+
+export function parseCodexAuthStatusPayload(rawBody) {
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  const appId = typeof payload?.appId === "string" ? payload.appId.trim() : "";
+  const authSessionId = typeof payload?.authSessionId === "string" ? payload.authSessionId.trim() : "";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
+    throw new Error("Invalid app id.");
+  }
+
+  if (!/^[a-f0-9-]{36}$/i.test(authSessionId)) {
+    throw new Error("Invalid auth session id.");
+  }
+
+  return { appId, authSessionId };
+}

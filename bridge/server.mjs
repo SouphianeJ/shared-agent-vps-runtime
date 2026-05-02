@@ -4,6 +4,11 @@ import { spawn } from "node:child_process";
 import { loadAppRegistry } from "./lib/apps.mjs";
 import { handleCleanupRequest } from "./lib/cleanup.mjs";
 import {
+  refreshCodexAuthSessionStatus,
+  serializeCodexAuthSession,
+  startCodexAuthSession,
+} from "./lib/codex-auth.mjs";
+import {
   applyCopilotAuthEnv,
   refreshCopilotAuthSessionStatus,
   serializeCopilotAuthSession,
@@ -12,6 +17,8 @@ import {
 import { ensureAppPaths, ensureCopilotWorkspaceSettings } from "./lib/mcp-config.mjs";
 import {
   parseCleanupPayload,
+  parseCodexAuthPayload,
+  parseCodexAuthStatusPayload,
   parseCopilotAuthPayload,
   parseCopilotAuthStatusPayload,
   parseFileDeletePayload,
@@ -68,6 +75,7 @@ const keyRegistry = new Map();
 const nonceCache = new Map();
 const runQueueByKey = new Map();
 const activeRunsByKey = new Map();
+const activeCodexAuthSessionsByApp = new Map();
 const activeCopilotAuthSessionsByApp = new Map();
 const appRegistryPromise = loadAppRegistry(runtimeAppsConfigPath, runtimeRoot);
 const r2Options = {
@@ -194,6 +202,35 @@ const server = createServer(async (request, response) => {
 
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       response.end(JSON.stringify(serializeCopilotAuthSession(session)));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/codex-auth/start" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseCodexAuthPayload(rawBody);
+      const appConfig = await resolveAppConfig(payload.appId);
+      const session = await startCodexAuthSession(appConfig, activeCodexAuthSessionsByApp, r2Options);
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(serializeCodexAuthSession(session)));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/codex-auth/status" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseCodexAuthStatusPayload(rawBody);
+      const appConfig = await resolveAppConfig(payload.appId);
+      const session = activeCodexAuthSessionsByApp.get(payload.appId);
+
+      if (!session || session.id !== payload.authSessionId) {
+        response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "Codex auth session not found." }));
+        return;
+      }
+
+      await refreshCodexAuthSessionStatus(session, appConfig, r2Options);
+
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(serializeCodexAuthSession(session)));
       return;
     }
 
