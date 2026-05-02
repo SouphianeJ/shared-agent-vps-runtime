@@ -213,10 +213,15 @@ function extractVerificationUri(value) {
 }
 
 function extractDeviceCode(value, verificationUri) {
+  const standaloneCode = findStandaloneDeviceCodeLine(value);
+
+  if (standaloneCode) {
+    return standaloneCode;
+  }
+
   const patterns = [
     /(?:user|device|one-time)[ -]?code(?: is)?[:\s]+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})*)/i,
     /enter (?:the )?code[:\s]+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})*)/i,
-    /code[:\s]+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})*)/i,
   ];
 
   for (const pattern of patterns) {
@@ -238,6 +243,25 @@ function extractDeviceCode(value, verificationUri) {
   } catch {
     return null;
   }
+}
+
+function findStandaloneDeviceCodeLine(value) {
+  const lines = value
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (/^[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+$/.test(line) && !isForbiddenCodeWord(line)) {
+      return line;
+    }
+  }
+
+  return null;
+}
+
+function isForbiddenCodeWord(value) {
+  return /^(authorization|authorisation|device|code|login|openai|chatgpt)$/i.test(value);
 }
 
 function extractCodexAuthFailure(text, combined) {
