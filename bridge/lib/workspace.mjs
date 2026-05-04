@@ -359,3 +359,36 @@ export async function streamUploadToDisk(request, fileDirectory, upload, { chatU
     sha256,
   };
 }
+
+export async function readChatTextFile(appConfig, chatId, fileId, { maxBytes = 1024 * 1024 } = {}) {
+  const fileDirectory = getFileDirectory(appConfig, chatId, fileId);
+  const metaPath = join(fileDirectory, "meta.json");
+  const blobPath = join(fileDirectory, "blob");
+  const metadata = JSON.parse(await readFile(metaPath, "utf8"));
+  const originalName = String(metadata.originalName ?? "");
+  const contentType = String(metadata.contentType ?? "application/octet-stream");
+  const fileSize = Number(metadata.size ?? 0);
+
+  if (!originalName.toLowerCase().endsWith(".txt") && !contentType.toLowerCase().startsWith("text/plain")) {
+    throw new Error("Only .txt previews are supported.");
+  }
+
+  if (!Number.isFinite(fileSize) || fileSize < 0) {
+    throw new Error("Invalid file metadata.");
+  }
+
+  if (maxBytes > 0 && fileSize > maxBytes) {
+    throw new Error(`Text preview exceeds the configured limit of ${maxBytes} bytes.`);
+  }
+
+  const content = await readFile(blobPath, "utf8");
+
+  return {
+    fileId,
+    originalName,
+    contentType,
+    size: fileSize,
+    sha256: String(metadata.sha256 ?? ""),
+    content,
+  };
+}

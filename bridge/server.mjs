@@ -49,6 +49,7 @@ import {
   emitWorkspaceSnapshot,
   getFileDirectory,
   materializeAttachedFiles,
+  readChatTextFile,
   registerActiveRun,
   resetGeneratedFilesDirectory,
   stopWorkspaceSnapshotWatcher,
@@ -157,6 +158,26 @@ const server = createServer(async (request, response) => {
 
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true, fileId: payload.fileId }));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/files/content" && request.method === "GET") {
+      await validateSignedEmptyRequest(request, requestUrl);
+      const appId = requestUrl.searchParams.get("appId")?.trim() ?? "";
+      const chatId = requestUrl.searchParams.get("chatId")?.trim() ?? "";
+      const fileId = requestUrl.searchParams.get("fileId")?.trim() ?? "";
+
+      if (!appId || !chatId || !fileId) {
+        response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "Missing file content target." }));
+        return;
+      }
+
+      const appConfig = await resolveAppConfig(appId);
+      const file = await readChatTextFile(appConfig, chatId, fileId);
+
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(file));
       return;
     }
 
@@ -301,6 +322,27 @@ async function readSignedBody(request, path) {
   }
 
   return rawBody;
+}
+
+async function validateSignedEmptyRequest(request, requestUrl) {
+  const headers = normalizeHeaders(request.headers);
+  const rawBody = Buffer.alloc(0);
+  const validationError = validateSignedRequest({
+    method: request.method,
+    path: `${requestUrl.pathname}${requestUrl.search}`,
+    headers,
+    rawBody,
+    keyRegistry,
+    nonceCache,
+    maxSkewSeconds,
+    nonceTtlSeconds,
+  });
+
+  if (validationError) {
+    const error = new Error(validationError.message);
+    error.statusCode = validationError.status;
+    throw error;
+  }
 }
 
 async function rmFileDirectory(appConfig, chatId, fileId) {
