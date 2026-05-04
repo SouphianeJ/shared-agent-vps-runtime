@@ -18,6 +18,7 @@ RUN apt-get update \
         less \
         openssh-client \
         python3 \
+        python3-chardet \
     && npm install -g @openai/codex \
     && npm_config_ignore_scripts=false npm install -g @github/copilot \
     && npm --prefix /app/browser-mcp install --omit=dev \

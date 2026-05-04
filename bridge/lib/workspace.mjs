@@ -2,6 +2,10 @@ import { createWriteStream } from "node:fs";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const TEXT_UPLOAD_NORMALIZER_PATH = fileURLToPath(new URL("../scripts/normalize-text-upload.py", import.meta.url));
 
 export function buildWorkspacePath(appConfig, chatId) {
   return `${appConfig.workspaceRoot.replace(/\/+$/, "")}/${chatId}`;
@@ -337,15 +341,30 @@ export async function streamUploadToDisk(request, fileDirectory, upload, { chatU
     throw new Error("Upload size does not match ticket size.");
   }
 
-  const sha256 = hash.digest("hex");
+  const uploadedSha256 = hash.digest("hex");
+  let storedSize = size;
+  let storedSha256 = uploadedSha256;
+  let textNormalization = null;
+
+  if (shouldNormalizeTextUpload(upload)) {
+    textNormalization = await normalizeUploadedTextFile(tempPath);
+    storedSize = textNormalization.size;
+    storedSha256 = textNormalization.sha256;
+  }
+
   const metadata = {
     id: upload.fileId,
     chatId: upload.chatId,
     originalName: sanitizeDisplayName(upload.filename),
     storedName: "blob",
-    contentType: upload.contentType,
-    size,
-    sha256,
+    contentType: normalizeTextContentType(upload.contentType, textNormalization),
+    size: storedSize,
+    sha256: storedSha256,
+    uploadedSize: size,
+    uploadedSha256,
+    sourceEncoding: textNormalization?.sourceEncoding ?? null,
+    normalizedEncoding: textNormalization ? "utf-8" : null,
+    encodingNormalized: Boolean(textNormalization?.normalized),
     createdAt: new Date().toISOString(),
   };
 
@@ -355,9 +374,70 @@ export async function streamUploadToDisk(request, fileDirectory, upload, { chatU
   return {
     ok: true,
     fileId: upload.fileId,
-    size,
-    sha256,
+    size: storedSize,
+    sha256: storedSha256,
+    uploadedSize: size,
+    uploadedSha256,
   };
+}
+
+export function shouldNormalizeTextUpload(upload) {
+  const filename = String(upload.filename ?? "").toLowerCase();
+  const contentType = String(upload.contentType ?? "").toLowerCase();
+
+  return (
+    contentType.startsWith("text/") ||
+    filename.endsWith(".txt") ||
+    filename.endsWith(".csv") ||
+    filename.endsWith(".md") ||
+    filename.endsWith(".markdown") ||
+    filename.endsWith(".aiken")
+  );
+}
+
+export function normalizeTextContentType(contentType, textNormalization) {
+  const value = String(contentType ?? "").trim();
+
+  if (!textNormalization) {
+    return value;
+  }
+
+  if (!value || /^text\/plain(?:\s*;.*)?$/i.test(value)) {
+    return "text/plain; charset=utf-8";
+  }
+
+  if (/^text\//i.test(value) && !/;\s*charset=/i.test(value)) {
+    return `${value}; charset=utf-8`;
+  }
+
+  return value.replace(/;\s*charset\s*=\s*[^;]+/i, "; charset=utf-8");
+}
+
+export async function normalizeUploadedTextFile(filePath) {
+  return await new Promise((resolve, reject) => {
+    execFile("python3", [TEXT_UPLOAD_NORMALIZER_PATH, filePath], { maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error((stderr || error.message || "Unable to normalize uploaded text file.").trim()));
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(String(stdout || "{}").trim() || "{}");
+        if (!Number.isFinite(Number(parsed.size)) || typeof parsed.sha256 !== "string") {
+          throw new Error("Invalid normalizer output.");
+        }
+        resolve({
+          normalized: Boolean(parsed.normalized),
+          sourceEncoding: String(parsed.sourceEncoding || "utf-8"),
+          targetEncoding: String(parsed.targetEncoding || "utf-8"),
+          size: Number(parsed.size),
+          sha256: parsed.sha256,
+        });
+      } catch (parseError) {
+        reject(parseError instanceof Error ? parseError : new Error("Unable to parse normalizer output."));
+      }
+    });
+  });
 }
 
 export async function readChatTextFile(appConfig, chatId, fileId, { maxBytes = 1024 * 1024 } = {}) {
@@ -389,6 +469,8 @@ export async function readChatTextFile(appConfig, chatId, fileId, { maxBytes = 1
     contentType,
     size: fileSize,
     sha256: String(metadata.sha256 ?? ""),
+    sourceEncoding: metadata.sourceEncoding ?? null,
+    normalizedEncoding: metadata.normalizedEncoding ?? null,
     content,
   };
 }
