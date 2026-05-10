@@ -489,6 +489,7 @@ function spawnAgent(payload, appConfig, workspacePath) {
 
   if (payload.engine === "copilot") {
     applyCopilotAuthEnv(runtimeEnv, appConfig);
+    const copilotSessionId = payload.sessionId || payload.chatId;
     const execArgs = [
       "--config-dir",
       appConfig.copilotHome,
@@ -499,8 +500,8 @@ function spawnAgent(payload, appConfig, workspacePath) {
       payload.model,
     ];
 
-    if (payload.sessionId) {
-      execArgs.push("--resume", payload.sessionId);
+    if (copilotSessionId) {
+      execArgs.push("--resume", copilotSessionId);
     }
 
     execArgs.push("-p", payload.prompt);
