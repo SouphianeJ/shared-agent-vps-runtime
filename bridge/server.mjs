@@ -71,6 +71,7 @@ const r2Endpoint = process.env.R2_ENDPOINT ?? "";
 const r2AccessKeyId = process.env.R2_ACCESS_KEY_ID ?? process.env.AWS_ACCESS_KEY_ID ?? "";
 const r2SecretAccessKey = process.env.R2_SECRET_ACCESS_KEY ?? process.env.AWS_SECRET_ACCESS_KEY ?? "";
 const r2AuthPrefix = process.env.R2_CODEX_AUTH_PREFIX ?? "codex-auth";
+const browserProvisionerUrl = process.env.BROWSER_PROVISIONER_URL ?? "http://browser-provisioner:11438";
 
 const keyRegistry = new Map();
 const nonceCache = new Map();
@@ -255,6 +256,95 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (requestUrl.pathname === "/codex/browser-provision/start" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseJsonBody(rawBody);
+      const appId = getRequiredString(payload.appId, "appId");
+      const appConfig = await resolveAppConfig(appId);
+      const targetPayload = {
+        appId,
+        appHome: appConfig.appHome,
+        siteScope: getRequiredString(payload.siteScope, "siteScope"),
+        url: getRequiredString(payload.url, "url"),
+        accountAlias: getOptionalString(payload.accountAlias) || "default",
+        restoreFromR2: payload.restoreFromR2 !== false,
+      };
+      const bridgePayload = await postBrowserProvisioner("/sessions/start", targetPayload);
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(bridgePayload));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/browser-provision/status" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseJsonBody(rawBody);
+      const appId = getRequiredString(payload.appId, "appId");
+      await resolveAppConfig(appId);
+      const bridgePayload = await postBrowserProvisioner("/sessions/status", {
+        sessionId: getRequiredString(payload.sessionId, "sessionId"),
+      });
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(bridgePayload));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/browser-provision/screenshot" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseJsonBody(rawBody);
+      const appId = getRequiredString(payload.appId, "appId");
+      await resolveAppConfig(appId);
+      const bridgePayload = await postBrowserProvisioner("/sessions/screenshot", {
+        sessionId: getRequiredString(payload.sessionId, "sessionId"),
+      });
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(bridgePayload));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/browser-provision/save-upload" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseJsonBody(rawBody);
+      const appId = getRequiredString(payload.appId, "appId");
+      await resolveAppConfig(appId);
+      const bridgePayload = await postBrowserProvisioner("/sessions/save-upload", {
+        sessionId: getRequiredString(payload.sessionId, "sessionId"),
+      });
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(bridgePayload));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/browser-provision/restore-screenshot" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseJsonBody(rawBody);
+      const appId = getRequiredString(payload.appId, "appId");
+      const appConfig = await resolveAppConfig(appId);
+      const targetPayload = {
+        appId,
+        appHome: appConfig.appHome,
+        siteScope: getRequiredString(payload.siteScope, "siteScope"),
+        url: getRequiredString(payload.url, "url"),
+        accountAlias: getOptionalString(payload.accountAlias) || "default",
+      };
+      const bridgePayload = await postBrowserProvisioner("/sessions/restore-screenshot", targetPayload);
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(bridgePayload));
+      return;
+    }
+
+    if (requestUrl.pathname === "/codex/browser-provision/close" && request.method === "POST") {
+      const rawBody = await readSignedBody(request, requestUrl.pathname);
+      const payload = parseJsonBody(rawBody);
+      const appId = getRequiredString(payload.appId, "appId");
+      await resolveAppConfig(appId);
+      const bridgePayload = await postBrowserProvisioner("/sessions/close", {
+        sessionId: getRequiredString(payload.sessionId, "sessionId"),
+      });
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(bridgePayload));
+      return;
+    }
+
     if (requestUrl.pathname !== "/codex/run" || request.method !== "POST") {
       response.writeHead(404).end("Not found");
       return;
@@ -343,6 +433,60 @@ async function validateSignedEmptyRequest(request, requestUrl) {
     error.statusCode = validationError.status;
     throw error;
   }
+}
+
+function parseJsonBody(rawBody) {
+  if (!rawBody.length) {
+    return {};
+  }
+
+  const parsed = JSON.parse(rawBody.toString("utf8"));
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Invalid JSON payload.");
+  }
+
+  return parsed;
+}
+
+function getOptionalString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getRequiredString(value, fieldName) {
+  const normalized = getOptionalString(value);
+
+  if (!normalized) {
+    const error = new Error(`Missing ${fieldName}.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+async function postBrowserProvisioner(path, payload) {
+  const targetUrl = new URL(path, browserProvisionerUrl).toString();
+  const response = await fetch(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(payload),
+  });
+  const responsePayload = (await response.json().catch(() => null)) ?? {};
+
+  if (!response.ok) {
+    const error = new Error(
+      typeof responsePayload === "object" && responsePayload !== null && "error" in responsePayload
+        ? String(responsePayload.error)
+        : `Browser provisioner request failed (${response.status}).`,
+    );
+    error.statusCode = response.status;
+    throw error;
+  }
+
+  return responsePayload;
 }
 
 async function rmFileDirectory(appConfig, chatId, fileId) {

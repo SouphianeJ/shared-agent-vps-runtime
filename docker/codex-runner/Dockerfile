@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY browser-mcp/package.json /app/browser-mcp/package.json
+COPY browser-provisioner/package.json /app/browser-provisioner/package.json
 COPY persist-mcp/package.json /app/persist-mcp/package.json
 
 RUN apt-get update \
@@ -16,12 +17,17 @@ RUN apt-get update \
         git \
         jq \
         less \
+        novnc \
         openssh-client \
         python3 \
         python3-chardet \
+        websockify \
+        x11vnc \
+        xvfb \
     && npm install -g @openai/codex \
     && npm_config_ignore_scripts=false npm install -g @github/copilot \
     && npm --prefix /app/browser-mcp install --omit=dev \
+    && npm --prefix /app/browser-provisioner install --omit=dev \
     && npm --prefix /app/persist-mcp install --omit=dev \
     && npx --prefix /app/browser-mcp playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
@@ -36,6 +42,7 @@ COPY docker/codex-runner/entrypoint.sh /usr/local/bin/agent-runtime-entrypoint
 RUN chmod 755 /usr/local/bin/agent-runtime-entrypoint
 
 COPY browser-mcp /app/browser-mcp
+COPY browser-provisioner /app/browser-provisioner
 COPY persist-mcp /app/persist-mcp
 
 USER node

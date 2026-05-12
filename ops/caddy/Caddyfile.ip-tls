@@ -1,0 +1,76 @@
+141.94.95.125 {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            profile shortlived
+        }
+    }
+
+    @allowed_origin header_regexp Origin ^(http://localhost:3000|http://localhost:3001|https://vps-personal-ai\.vercel\.app|https://vps-personal-codex\.vercel\.app)$
+
+    @preflight_allowed {
+        method OPTIONS
+        header_regexp Origin ^(http://localhost:3000|http://localhost:3001|https://vps-personal-ai\.vercel\.app|https://vps-personal-codex\.vercel\.app)$
+    }
+
+    @origin_forbidden {
+        header_regexp Origin .+
+        not header_regexp Origin ^(http://localhost:3000|http://localhost:3001|https://vps-personal-ai\.vercel\.app|https://vps-personal-codex\.vercel\.app)$
+    }
+
+    handle @preflight_allowed {
+        header Access-Control-Allow-Origin "{header.Origin}"
+        header Access-Control-Allow-Methods "POST, GET, PUT, DELETE, OPTIONS"
+        header Access-Control-Allow-Headers "Authorization, Content-Type, X-Proxy-Key-Id, X-Proxy-Timestamp, X-Proxy-Nonce, X-Proxy-Body-Sha256, X-Proxy-Signature, X-Upload-Token, X-Upload-Filename, X-Upload-Content-Type"
+        header Access-Control-Max-Age "86400"
+        respond "" 204
+    }
+
+    handle @origin_forbidden {
+        respond "Forbidden origin" 403
+    }
+
+    handle_path /browser/* {
+        reverse_proxy 127.0.0.1:16080
+    }
+
+    handle /local/mcpcourse/* {
+        reverse_proxy 127.0.0.1:8080 {
+            header_up Host 141.94.95.125:8443
+            header_up X-Forwarded-Host 141.94.95.125:8443
+            header_up X-Forwarded-Port 8443
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle /codex/* {
+        reverse_proxy 127.0.0.1:11437
+    }
+
+    handle /compactor/* {
+        reverse_proxy 127.0.0.1:11436
+    }
+
+    handle @allowed_origin {
+        header Access-Control-Allow-Origin "{header.Origin}"
+        header Access-Control-Allow-Methods "POST, GET, PUT, DELETE, OPTIONS"
+        header Access-Control-Allow-Headers "Authorization, Content-Type, X-Proxy-Key-Id, X-Proxy-Timestamp, X-Proxy-Nonce, X-Proxy-Body-Sha256, X-Proxy-Signature, X-Upload-Token, X-Upload-Filename, X-Upload-Content-Type"
+        reverse_proxy 127.0.0.1:11435
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:11435
+    }
+}
+
+141.94.95.125:8443 {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            profile shortlived
+        }
+    }
+
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080
+}
