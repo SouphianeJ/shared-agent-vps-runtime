@@ -26,9 +26,11 @@ for app in "${APPS[@]}"; do
   mkdir -p \
     "$ROOT_DIR/runtime/apps/$app/codex-home" \
     "$ROOT_DIR/runtime/apps/$app/copilot-home" \
+    "$ROOT_DIR/runtime/apps/$app/mistral-home" \
     "$ROOT_DIR/runtime/apps/$app/workspaces/chats"
   ln -sfn "$ROOT_DIR/runtime/apps/$app/codex-home" "$ROOT_DIR/runtime/apps/$app/.codex"
   ln -sfn "$ROOT_DIR/runtime/apps/$app/copilot-home" "$ROOT_DIR/runtime/apps/$app/.copilot"
+  ln -sfn "$ROOT_DIR/runtime/apps/$app/mistral-home" "$ROOT_DIR/runtime/apps/$app/.mistral"
   auth_r2_restore "$ROOT_DIR" "$app"
 done
 

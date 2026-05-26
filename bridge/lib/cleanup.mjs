@@ -15,6 +15,7 @@ export async function handleCleanupRequest(payload, appConfig, response, activeR
   const deletedCodexSessionFiles = await purgeCodexSessionArtifacts(appConfig, payload, workspacePath);
   const { deletedDirectories: deletedCopilotSessionDirs, deletedLogFiles: deletedCopilotLogFiles } =
     await purgeCopilotSessionArtifacts(appConfig, payload, workspacePath);
+  const deletedMistralSessionFiles = await purgeMistralSessionArtifacts(appConfig, payload, workspacePath);
 
   response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
   response.end(
@@ -25,6 +26,7 @@ export async function handleCleanupRequest(payload, appConfig, response, activeR
       deletedCodexSessionFiles,
       deletedCopilotSessionDirs,
       deletedCopilotLogFiles,
+      deletedMistralSessionFiles,
     }),
   );
 }
@@ -105,6 +107,28 @@ export async function purgeCopilotSessionArtifacts(appConfig, payload, workspace
   });
 
   return { deletedDirectories, deletedLogFiles };
+}
+
+export async function purgeMistralSessionArtifacts(appConfig, payload, workspacePath) {
+  const sessionRoot = join(appConfig.mistralHome, "sessions");
+  const markers = [payload.chatId, workspacePath, payload.mistralSessionId].filter(Boolean);
+
+  if (markers.length === 0) {
+    return 0;
+  }
+
+  return removeFilesByPredicate(sessionRoot, async (filePath) => {
+    if (!filePath.endsWith(".json")) {
+      return false;
+    }
+
+    if (payload.mistralSessionId && filePath.includes(payload.mistralSessionId)) {
+      return true;
+    }
+
+    const content = await safeReadUtf8(filePath);
+    return markers.some((marker) => content.includes(marker));
+  });
 }
 
 export async function findCopilotSessionDirectories(sessionStateRoot) {

@@ -14,7 +14,7 @@ import {
   serializeCopilotAuthSession,
   startCopilotAuthSession,
 } from "./lib/copilot-auth.mjs";
-import { ensureAppPaths, ensureCopilotWorkspaceSettings } from "./lib/mcp-config.mjs";
+import { buildMistralMcpConfig, ensureAppPaths, ensureCopilotWorkspaceSettings } from "./lib/mcp-config.mjs";
 import {
   parseCleanupPayload,
   parseCodexAuthPayload,
@@ -367,6 +367,15 @@ const server = createServer(async (request, response) => {
       typeof error === "object" && error !== null && "statusCode" in error && Number.isInteger(error.statusCode)
         ? error.statusCode
         : 502;
+
+    if (response.headersSent) {
+      if (!response.writableEnded) {
+        response.write(`${JSON.stringify({ type: "error", message })}\n`);
+        response.end();
+      }
+      return;
+    }
+
     response.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
     response.end(message);
   }
@@ -629,6 +638,7 @@ function spawnAgent(payload, appConfig, workspacePath) {
     HOME: appConfig.appHome,
     CODEX_HOME: appConfig.codexHome,
     COPILOT_HOME: appConfig.copilotHome,
+    MISTRAL_HOME: appConfig.mistralHome,
   };
 
   if (payload.engine === "copilot") {
@@ -653,6 +663,35 @@ function spawnAgent(payload, appConfig, workspacePath) {
     return spawn("copilot", execArgs, {
       cwd: workspacePath,
       env: runtimeEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+  }
+
+  if (payload.engine === "mistral") {
+    const mistralApiKey =
+      process.env[`${appConfig.copilotMcpEnvPrefix}_MISTRAL_API_KEY`]?.trim() || process.env.MISTRAL_API_KEY?.trim() || "";
+
+    if (!mistralApiKey) {
+      throw new Error(`Missing Mistral API key for app ${appConfig.id}.`);
+    }
+
+    const mistralMcpConfig = buildMistralMcpConfig(appConfig, workspacePath, {
+      payloadEnabledServers: payload.enabledMcpServers,
+      includeBrowserMcp: payload.includeBrowserMcp,
+    });
+
+    return spawn("node", ["/app/mistral-agent/run.mjs"], {
+      cwd: workspacePath,
+      env: {
+        ...runtimeEnv,
+        MISTRAL_API_KEY: mistralApiKey,
+        MISTRAL_MODEL: payload.model,
+        MISTRAL_REASONING_EFFORT: payload.reasoningEffort ?? "",
+        MISTRAL_SESSION_ID: payload.sessionId || payload.chatId,
+        MISTRAL_PROMPT: payload.prompt,
+        MISTRAL_MCP_CONFIG: JSON.stringify(mistralMcpConfig),
+      },
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });

@@ -9,6 +9,7 @@
         "appHome": "apps/vps-personal-codex",
         "codexHome": "apps/vps-personal-codex/codex-home",
         "copilotHome": "apps/vps-personal-codex/copilot-home",
+        "mistralHome": "apps/vps-personal-codex/mistral-home",
         "workspaceRoot": "apps/vps-personal-codex/workspaces/chats"
       }
     },
@@ -21,6 +22,7 @@
         "appHome": "apps/weekly-ideator-control-plane",
         "codexHome": "apps/weekly-ideator-control-plane/codex-home",
         "copilotHome": "apps/weekly-ideator-control-plane/copilot-home",
+        "mistralHome": "apps/weekly-ideator-control-plane/mistral-home",
         "workspaceRoot": "apps/weekly-ideator-control-plane/workspaces/chats"
       }
     },
@@ -33,6 +35,7 @@
         "appHome": "apps/moodle-actions",
         "codexHome": "apps/moodle-actions/codex-home",
         "copilotHome": "apps/moodle-actions/copilot-home",
+        "mistralHome": "apps/moodle-actions/mistral-home",
         "workspaceRoot": "apps/moodle-actions/workspaces/chats"
       }
     }

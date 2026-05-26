@@ -5,7 +5,12 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY browser-mcp/package.json /app/browser-mcp/package.json
 COPY browser-provisioner/package.json /app/browser-provisioner/package.json
+COPY mistral-agent/package.json /app/mistral-agent/package.json
 COPY persist-mcp/package.json /app/persist-mcp/package.json
+COPY browser-mcp /app/browser-mcp
+COPY browser-provisioner /app/browser-provisioner
+COPY mistral-agent /app/mistral-agent
+COPY persist-mcp /app/persist-mcp
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -28,6 +33,7 @@ RUN apt-get update \
     && npm_config_ignore_scripts=false npm install -g @github/copilot \
     && npm --prefix /app/browser-mcp install --omit=dev \
     && npm --prefix /app/browser-provisioner install --omit=dev \
+    && npm --prefix /app/mistral-agent install --omit=dev \
     && npm --prefix /app/persist-mcp install --omit=dev \
     && npx --prefix /app/browser-mcp playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
@@ -40,10 +46,6 @@ RUN mkdir -p /runtime \
 
 COPY docker/codex-runner/entrypoint.sh /usr/local/bin/agent-runtime-entrypoint
 RUN chmod 755 /usr/local/bin/agent-runtime-entrypoint
-
-COPY browser-mcp /app/browser-mcp
-COPY browser-provisioner /app/browser-provisioner
-COPY persist-mcp /app/persist-mcp
 
 USER node
 WORKDIR /runtime

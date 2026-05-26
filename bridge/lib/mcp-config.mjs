@@ -14,6 +14,7 @@ export async function ensureAppPaths(appConfig, workspacePath, options = {}) {
   await mkdir(appConfig.appHome, { recursive: true });
   await mkdir(appConfig.codexHome, { recursive: true });
   await mkdir(appConfig.copilotHome, { recursive: true });
+  await mkdir(appConfig.mistralHome, { recursive: true });
   await mkdir(appConfig.workspaceRoot, { recursive: true });
   await mkdir(workspacePath, { recursive: true });
   await mkdir(join(appConfig.fileLibraryRoot, "chats"), { recursive: true });
@@ -76,6 +77,53 @@ export function buildCopilotMcpPayload(appConfig, workspacePath, options = {}) {
       ...(includeBrowserMcp ? { Browser: buildCopilotBrowserMcpServerConfig(browserConfig) } : {}),
       Persist: buildCopilotPersistMcpServerConfig(persistConfig),
     },
+  };
+}
+
+export function buildMistralMcpConfig(appConfig, workspacePath, options = {}) {
+  const { payloadEnabledServers = null, includeBrowserMcp = true } = options;
+  const selectedEntries = getSelectedMcpServerEntries(appConfig, payloadEnabledServers);
+  const browserConfig = includeBrowserMcp ? buildBrowserServerPaths(workspacePath, appConfig.id) : null;
+  const persistConfig = buildPersistServerPaths(appConfig, workspacePath);
+
+  return {
+    servers: [
+      ...selectedEntries.map(([serverName, url]) => ({
+        serverName,
+        transport: "http",
+        url,
+      })),
+      ...(includeBrowserMcp
+        ? [
+            {
+              serverName: "Browser",
+              transport: "stdio",
+              command: browserConfig.command,
+              args: browserConfig.args,
+              env: buildCopilotBrowserMcpServerConfig(browserConfig).env,
+            },
+          ]
+        : []),
+      {
+        serverName: "Persist",
+        transport: "stdio",
+        command: persistConfig.command,
+        args: persistConfig.args,
+        env: {
+          ...buildCopilotPersistMcpServerConfig(persistConfig).env,
+          R2_BUCKET: process.env.R2_BUCKET?.trim() || "",
+          R2_ENDPOINT: process.env.R2_ENDPOINT?.trim() || "",
+          R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID?.trim() || process.env.AWS_ACCESS_KEY_ID?.trim() || "",
+          R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY?.trim() || process.env.AWS_SECRET_ACCESS_KEY?.trim() || "",
+          R2_PUBLIC_BASE_URL: process.env.R2_PUBLIC_BASE_URL?.trim() || "",
+          R2_PORTFOLIO_PUBLIC_PREFIX: process.env.R2_PORTFOLIO_PUBLIC_PREFIX?.trim() || "proof-artifacts",
+          R2_BROWSER_STATE_PREFIX: process.env.R2_BROWSER_STATE_PREFIX?.trim() || "browser-storage-state",
+          SEEDPORTFOLIO_MONGODB_URI: process.env.SEEDPORTFOLIO_MONGODB_URI?.trim() || "",
+          SEEDPORTFOLIO_MONGODB_DB: process.env.SEEDPORTFOLIO_MONGODB_DB?.trim() || "",
+          SEEDPORTFOLIO_PROOFS_COLLECTION: process.env.SEEDPORTFOLIO_PROOFS_COLLECTION?.trim() || "proofs",
+        },
+      },
+    ],
   };
 }
 

@@ -24,6 +24,7 @@ export async function loadAppRegistry(runtimeAppsConfigPath, runtimeRoot) {
           appHome,
           codexHome: buildRuntimePath(String(app.paths?.codexHome ?? ""), runtimeRoot),
           copilotHome: buildRuntimePath(String(app.paths?.copilotHome ?? ""), runtimeRoot),
+          mistralHome: buildRuntimePath(String(app.paths?.mistralHome ?? ""), runtimeRoot),
           workspaceRoot: buildRuntimePath(String(app.paths?.workspaceRoot ?? ""), runtimeRoot),
           fileLibraryRoot: `${appHome}/file-library`,
         },

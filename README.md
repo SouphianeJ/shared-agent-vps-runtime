@@ -4,13 +4,14 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 
 ## Ce repo contient
 
-- l'image Docker commune `codex + copilot`
+- l'image Docker commune `codex + copilot + mistral-agent`
 - le bridge HTTP signe expose sur `/codex/*`
 - l'upload direct de fichiers expose sur `/codex/files/*`
 - la recolte des fichiers generes depuis `__generated_files__/` en fin de run
 - l'emission d'evenements NDJSON `generated_file` avec metadonnees persistables (`fileId`, `originalName`, `contentType`, `size`, `sha256`)
 - un MCP local `Persist` pour publier des artefacts navigateur vers R2 et rattacher un `repo_card` existant dans `seedPortfolio`
 - l'injection d'un token Copilot dedie par application pour les runs non interactifs
+- l'injection d'une cle API Mistral dediee par application pour les runs API
 - la configuration multi-app du runtime
 - les scripts de bootstrap/deploiement VPS
 - le workflow GitHub Actions de deploiement
@@ -19,7 +20,7 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
 
 - une seule source Git pour le runtime deploye
 - un `appId` obligatoire pour chaque requete bridge
-- etats `Codex`, `Copilot` et workspaces separes par application
+- etats `Codex`, `Copilot`, `Mistral` et workspaces separes par application
 - configuration MCP Copilot uniquement dans le workspace via `.mcp.json`
 - convention de sortie utilisateur via `__generated_files__/` dans le workspace
 - bibliotheque de fichiers persistants par app/chat dans `file-library`
@@ -41,14 +42,17 @@ Runtime VPS partage pour les clients agents (`vps-personal-codex`, `weekly-ideat
     vps-personal-codex/
       codex-home/
       copilot-home/
+      mistral-home/
       workspaces/
     moodle-actions/
       codex-home/
       copilot-home/
+      mistral-home/
       workspaces/
     weekly-ideator-control-plane/
       codex-home/
       copilot-home/
+      mistral-home/
       workspaces/
 ```
 
@@ -76,6 +80,21 @@ Variables supportees:
   - prioritaire pour l'app `moodle-actions`
 
 Le runtime supprime volontairement `GH_TOKEN` et `GITHUB_TOKEN` de l'environnement du process `copilot` pour eviter qu'un token stale ou non supporte prenne le dessus par erreur.
+
+## Auth Mistral API
+
+Variables supportees:
+
+- `MISTRAL_API_KEY`
+  - fallback global
+- `VPS_PERSONAL_CODEX_MISTRAL_API_KEY`
+  - prioritaire pour l'app `vps-personal-codex`
+- `WEEKLY_IDEATOR_MISTRAL_API_KEY`
+  - prioritaire pour l'app `weekly-ideator-control-plane`
+- `MOODLE_ACTIONS_MISTRAL_API_KEY`
+  - prioritaire pour l'app `moodle-actions`
+
+Le runtime Mistral rejoue l'historique de conversation persiste dans `mistral-home/sessions/` et expose les MCP distants + Browser/Persist via une boucle tool-calling locale.
 
 ## Auth Codex via R2
 
@@ -120,7 +139,7 @@ Le bootstrap appelle automatiquement le restore R2 pour chaque app declaree dans
 
 ## Persist MCP
 
-Le runtime injecte un MCP local `Persist` dans Codex et Copilot.
+Le runtime injecte un MCP local `Persist` dans Codex, Copilot et Mistral.
 
 Tools exposes:
 

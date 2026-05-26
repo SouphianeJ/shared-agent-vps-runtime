@@ -15,7 +15,7 @@ export function parsePayload(rawBody, { defaultModel = "", allowDangerousDefault
   const chatId = typeof payload.chatId === "string" ? payload.chatId.trim() : "";
   const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
   const sessionId = typeof payload.sessionId === "string" && payload.sessionId.trim() ? payload.sessionId.trim() : null;
-  const engine = payload.engine === "copilot" ? "copilot" : "codex";
+  const engine = payload.engine === "copilot" ? "copilot" : payload.engine === "mistral" ? "mistral" : "codex";
   const model = typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : defaultModel;
   const reasoningEffort =
     payload.reasoningEffort === "low" || payload.reasoningEffort === "medium" || payload.reasoningEffort === "high"
@@ -124,6 +124,8 @@ export function parseCleanupPayload(rawBody) {
   const codexSessionId = typeof payload?.codexSessionId === "string" && payload.codexSessionId.trim() ? payload.codexSessionId.trim() : null;
   const copilotSessionId =
     typeof payload?.copilotSessionId === "string" && payload.copilotSessionId.trim() ? payload.copilotSessionId.trim() : null;
+  const mistralSessionId =
+    typeof payload?.mistralSessionId === "string" && payload.mistralSessionId.trim() ? payload.mistralSessionId.trim() : null;
 
   if (!/^[a-zA-Z0-9_-]+$/.test(appId)) {
     throw new Error("Invalid app id.");
@@ -139,6 +141,7 @@ export function parseCleanupPayload(rawBody) {
     workspacePath,
     codexSessionId,
     copilotSessionId,
+    mistralSessionId,
   };
 }
 
