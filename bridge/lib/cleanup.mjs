@@ -43,7 +43,7 @@ export function resolveWorkspaceCleanupPath(appConfig, chatId, workspacePath) {
   const relativeWorkspacePath = relative(resolvedWorkspaceRoot, resolvedWorkspacePath);
 
   if (isAbsolute(relativeWorkspacePath) || relativeWorkspacePath.startsWith("..")) {
-    throw new Error("Workspace cleanup path is outside the application workspace root.");
+    return fallbackWorkspacePath;
   }
 
   return resolvedWorkspacePath;

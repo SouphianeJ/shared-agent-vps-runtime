@@ -294,9 +294,23 @@ async function restoreStateForSession(session) {
 
 async function createProvisioningSession(input) {
   if (sessions.size > 0) {
-    const error = new Error("Only one interactive browser provisioning session is allowed at a time.");
-    error.statusCode = 409;
-    throw error;
+    const [existingSession] = sessions.values();
+
+    if (
+      existingSession &&
+      existingSession.appId === input.appId &&
+      existingSession.siteScope === input.siteScope &&
+      existingSession.accountAlias === (input.accountAlias || "default") &&
+      existingSession.url === input.url
+    ) {
+      existingSession.updatedAt = new Date().toISOString();
+      existingSession.status = existingSession.status || "ready";
+      return existingSession;
+    }
+
+    if (existingSession) {
+      await closeAndDeleteSession(existingSession.id);
+    }
   }
 
   const id = randomUUID();
@@ -458,15 +472,10 @@ function buildInteractiveUrl() {
   }
 
   const target = new URL(`${publicBaseUrl}/vnc.html`);
-  const normalizedPath = target.pathname.replace(/\/+$/, "");
-  const pathPrefix = normalizedPath.endsWith("/vnc.html")
-    ? normalizedPath.slice(0, -"/vnc.html".length)
-    : normalizedPath.replace(/\/+$/, "");
-  const websocketPath = `${pathPrefix ? `${pathPrefix.replace(/^\/+/, "")}/` : ""}websockify`;
   target.searchParams.set("autoconnect", "1");
   target.searchParams.set("resize", "scale");
   target.searchParams.set("view_only", "0");
-  target.searchParams.set("path", websocketPath);
+  target.searchParams.set("path", "browser/websockify");
   return target.toString();
 }
 
@@ -489,13 +498,62 @@ function createChildProcess(command, args, extraEnv = {}) {
   return child;
 }
 
+async function killStaleRemoteDesktopProcesses() {
+  await new Promise((resolve) => {
+    const child = spawn("sh", ["-lc", "pkill -f 'x11vnc|websockify' >/dev/null 2>&1 || true"], {
+      stdio: ["ignore", "ignore", "ignore"],
+      env: process.env,
+    });
+    child.once("exit", () => resolve(undefined));
+    child.once("error", () => resolve(undefined));
+  });
+}
+
+async function isVirtualDisplayProcessRunning() {
+  return await new Promise((resolve) => {
+    const escapedDisplay = displayName.replace(/"/g, '\\"');
+    const child = spawn("sh", ["-lc", `pgrep -f "Xvfb ${escapedDisplay}" >/dev/null 2>&1`], {
+      stdio: ["ignore", "ignore", "ignore"],
+      env: process.env,
+    });
+    child.once("exit", (code) => resolve(code === 0));
+    child.once("error", () => resolve(false));
+  });
+}
+
+async function cleanupStaleVirtualDisplayLock(displayLockPath) {
+  await new Promise((resolve) => {
+    const displayNumber = displayName.replace(/^:/, "");
+    const child = spawn("sh", ["-lc", `rm -f "${displayLockPath}" "/tmp/.X11-unix/X${displayNumber}" >/dev/null 2>&1 || true`], {
+      stdio: ["ignore", "ignore", "ignore"],
+      env: process.env,
+    });
+    child.once("exit", () => resolve(undefined));
+    child.once("error", () => resolve(undefined));
+  });
+}
+
 async function waitForChildExit(child) {
   return new Promise((resolve) => {
+    if (!child || child.exitCode !== null) {
+      resolve(undefined);
+      return;
+    }
+
     child.once("exit", () => resolve(undefined));
-    child.kill("SIGTERM");
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      resolve(undefined);
+      return;
+    }
     setTimeout(() => {
-      if (!child.killed) {
-        child.kill("SIGKILL");
+      if (child.exitCode === null && !child.killed) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          resolve(undefined);
+        }
       }
     }, 1_500).unref();
   });
@@ -507,10 +565,31 @@ async function ensureVirtualDisplay() {
   }
 
   displayStatePromise = (async () => {
+    const displayLockPath = `/tmp/.X${displayName.replace(/^:/, "")}-lock`;
+    const displayRunning = await isVirtualDisplayProcessRunning();
+
+    if (existsSync(displayLockPath) && displayRunning) {
+      process.env.DISPLAY = displayName;
+      return {
+        child: null,
+      };
+    }
+
+    if (existsSync(displayLockPath) && !displayRunning) {
+      await cleanupStaleVirtualDisplayLock(displayLockPath);
+    }
+
     const child = createChildProcess("Xvfb", [displayName, "-screen", "0", screenSize, "-ac", "-nolisten", "tcp"]);
     await new Promise((resolve) => setTimeout(resolve, 600));
 
     if (child.exitCode !== null) {
+      if (existsSync(displayLockPath) && (await isVirtualDisplayProcessRunning())) {
+        process.env.DISPLAY = displayName;
+        return {
+          child: null,
+        };
+      }
+
       throw new Error("Unable to start Xvfb for browser provisioning.");
     }
 
@@ -564,6 +643,7 @@ async function stopRemoteDesktop() {
 async function ensureRemoteDesktop(session) {
   await ensureVirtualDisplay();
   await stopRemoteDesktop();
+  await killStaleRemoteDesktopProcesses();
   const passwordFilePath = join(session.sessionRoot, "x11vnc.pass");
   await writeVncPasswordFile(passwordFilePath, session.interactivePassword);
 

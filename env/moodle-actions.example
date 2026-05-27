@@ -17,4 +17,4 @@ COPILOT_MCP_GITHUB_URL=https://mcp-github-client-proxy.vercel.app/mcp
 COPILOT_MCP_DBANALYZER_URL=https://mcp-dbanalyzer-client-proxy.vercel.app/mcp
 COPILOT_MCP_DBWORKER_URL=https://mcp-dbworker-client-proxy.vercel.app/mcp
 COPILOT_MCP_COMPETENCIES_URL=https://mcp-personal-competencies-client-pr.vercel.app/mcp
-COPILOT_MCP_MOODLE_URL=https://mcp-moodle-client-proxy.vercel.app/mcp
+COPILOT_MCP_MOODLE_URL=https://mcp-moodle-client-proxy.vercel.app/connectors/cn_yGhiX4fzghuc2oqP/mcp

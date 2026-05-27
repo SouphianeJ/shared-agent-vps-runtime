@@ -161,21 +161,29 @@ async function buildToolRegistry() {
   const registry = [];
 
   for (const server of mcpConfig.servers) {
-    const connection = await createMcpClient(server);
-    const { tools } = await connection.client.listTools();
+    try {
+      const connection = await createMcpClient(server);
+      const { tools } = await connection.client.listTools();
 
-    for (const tool of tools) {
-      const mistralToolName = normalizeToolName(server.serverName, tool.name);
-      registry.push({
-        mistralToolName,
-        toolName: tool.name,
+      for (const tool of tools) {
+        const mistralToolName = normalizeToolName(server.serverName, tool.name);
+        registry.push({
+          mistralToolName,
+          toolName: tool.name,
+          serverName: server.serverName,
+          description: tool.description || `${server.serverName} :: ${tool.name}`,
+          inputSchema:
+            tool.inputSchema && typeof tool.inputSchema === "object"
+              ? tool.inputSchema
+              : { type: "object", properties: {}, additionalProperties: true },
+          client: connection.client,
+        });
+      }
+    } catch (error) {
+      emit({
+        type: "connector_error",
         serverName: server.serverName,
-        description: tool.description || `${server.serverName} :: ${tool.name}`,
-        inputSchema:
-          tool.inputSchema && typeof tool.inputSchema === "object"
-            ? tool.inputSchema
-            : { type: "object", properties: {}, additionalProperties: true },
-        client: connection.client,
+        message: error instanceof Error ? error.message : String(error),
       });
     }
   }

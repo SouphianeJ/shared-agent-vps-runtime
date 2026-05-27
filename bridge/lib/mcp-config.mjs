@@ -6,7 +6,7 @@ const DEFAULT_MCP_SERVER_URLS = {
   DBanalyzer: "https://mcp-dbanalyzer-client-proxy.vercel.app/mcp",
   DBworker: "https://mcp-dbworker-client-proxy.vercel.app/mcp",
   MCPcompetencies: "https://mcp-personal-competencies-client-pr.vercel.app/mcp",
-  Moodle: "https://mcp-moodle-client-proxy.vercel.app/mcp",
+  Moodle: "https://mcp-moodle-client-proxy.vercel.app/connectors/cn_yGhiX4fzghuc2oqP/mcp",
 };
 
 export async function ensureAppPaths(appConfig, workspacePath, options = {}) {
